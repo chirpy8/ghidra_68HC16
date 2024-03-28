@@ -1,0 +1,2948 @@
+# .sinc file for HC16 constructors
+# chirpy
+
+
+define endian=big;
+define alignment=1;
+
+define space code type=ram_space size=4 default;
+define space register type=register_space size=2;
+
+################################################################
+# Registers
+################################################################
+
+define register offset=0x00 size=1 [A B];
+define register offset=0x00 size=2 [D];
+define register offset=0x02 size=2 [E];
+
+define register offset=0x10 size=4 [IXE IYE IZE]; # pseudo 20 (32 actual) bit registers for index registers
+define register offset=0x10 size=2 [_ IX _ IY _ IZ];
+define register offset=0x10 size=2 [XKE _ YKE _ ZKE]; # pseudo registers for extension registers
+
+define register offset=0x20 size=4 [SPextended];   # Stack grows downward/negative address, SK:SP points to next available stack address, needs to address 20 bits with extension
+define register offset=0x22 size=2 [SP];   # 16 bit register
+define register offset=0x20 size=2 [SP_EXT];   # 4 bit extension register
+
+define register offset=0x30 size=4 [PCextended]; # used as proxy for PK:PC which points to program address, needs to address 20 bits with extension, PK is not actively updated
+define register offset=0x32 size=2 [PC]; # 16 bit register
+
+# CCR_PK is only maintained as valid when specifically synced to the current flag values, using macros
+define register offset=0x40 size=2 [CCR_PK];
+define register offset=0x42 size=1 [SM IPF C V Z N EV H MV S SignLatch];
+
+define register offset=0x50 size=2 [K];
+define register offset=0x52 size=4 [EK];
+       
+define register offset=0x60 size=2 [HR IR];
+
+#AM is modelled so that it is always sign extended to full 5 bytes
+# - i.e. AM[36-39] are always signed extended from AM[35] using macro checkOverflowAM()
+define register offset=0x70 size=5 [AMFull];
+define register offset=0x70 size=1 [AM_MSB];
+define register offset=0x71 size=2 [AM_MidW];
+define register offset=0x73 size=2 [AM_LSW];
+define register offset=0x70 size=3 [AM_Top3];
+
+define register offset=0x80 size=2 [XYMSK];
+define register offset=0x80 size=1 [XMSK YMSK];
+
+define register offset=0xC0 size=4 contextreg;
+define context contextreg # used to decode code pages, via :^instruction tables
+  phase=(0,0)    # 0:initial, 1:instruction-parse
+  prefix=(1,2)   # 0:none, 1: 0x17, 2:0x27, 3:0x37)
+;
+
+
+################################################################
+# Tokens
+################################################################
+
+define token opbyte8 (8)
+ op8    = (0,7)
+ op7_7 = (7,7)
+ op6_6 = (6,6)
+ op7_6 = (6,7)
+ op7_4 = (4,7)
+ op7_2 = (2,7)
+ op7_1 = (1,7)
+ op5_4 = (4,5)
+ op5_4a = (4,5)
+ op5_4b = (4,5)
+ op3_0 = (0,3)
+ op1_1 = (1,1)
+ op0_0 = (0,0)
+;
+
+define token data8 (8)
+	imm8  = (0,7)
+	imm8a  = (0,7)
+	mask8 = (0,7)
+	simm8 = (0,7) signed
+	imm0a = (0,0)
+	imm1a = (1,1)
+	imm2a = (2,2)
+	imm3a = (3,3)
+	imm4a = (4,4)
+	imm5a = (5,5)
+	imm6a = (6,6)
+	imm7a = (7,7)
+	imm0c = (0,0)
+	imm1c = (1,1)
+	imm2c = (2,2)
+	imm3c = (3,3)
+	imm4c = (4,4)
+	imm5c = (5,5)
+	imm6c = (6,6)
+	imm7c = (7,7)
+	imm0_1 = (0,1)
+	imm0_2 = (0,2)
+	imm0_3 = (0,3)
+	imm0_4 = (0,4)
+	imm0_5 = (0,5)
+	imm0_6 = (0,6)
+;
+
+define token data16 (16)
+	imm16  = (0,15)
+	imm16a = (0,15)
+	simm16 = (0,15) signed
+;
+
+attach variables [op5_4] [IX IY IZ _ ]; # used to select register for indexed addressing
+attach variables [op5_4a] [IXE IYE IZE _ ]; # used to select register for indexed addressing
+
+attach names [op5_4b] ["X" "Y" "Z" "Unknown"]; # used to display the index register being used
+
+attach names [imm0a imm6c] [ "" "D"];
+attach names [imm1a imm5c] [ "" "E"];
+attach names [imm2a imm4c] [ "" "IX"];
+attach names [imm3a imm3c] [ "" "IY"];
+attach names [imm4a imm2c] [ "" "IZ"];
+attach names [imm5a imm1c] [ "" "K"];
+attach names [imm6a imm0c] [ "" "CCR"];
+
+################################################################
+# Pseudo Instructions
+################################################################
+
+define pcodeop backgroundDebugMode;
+define pcodeop lowPowerStop;
+define pcodeop WaitForInterrupt;
+
+
+################################################################
+# Macros
+################################################################
+
+macro addition_flags8(operand1, operand2, result) {
+	local a3:1 = operand1[3,1];
+	local b3:1 = operand2[3,1];
+	local not_r3:1 = !result[3,1];
+	H = (a3 && b3) || (b3 && not_r3) || (not_r3 && a3);	
+	C = carry(operand1, operand2);
+	V = scarry(operand1, operand2);
+	N = (result s< 0);
+	Z = (result == 0);
+}
+
+macro additionWithCarry8(operand1, operand2, result) {
+	result = operand1 + operand2 + C;
+	local a3:1 = operand1[3,1];
+	local b3:1 = operand2[3,1];
+	local not_r3:1 = !result[3,1];
+	H = (a3 && b3) || (b3 && not_r3) || (not_r3 && a3);	
+
+	local x7:1 = operand1[7,1];
+	local m7:1 = operand2[7,1];
+	local r7:1 = result[7,1];
+
+	V = (x7 && m7 && !r7) || (!x7 && !m7 && r7);
+	C = (x7 && m7) || (m7 && !r7) || (!r7 && x7);
+	N = (result s< 0);
+	Z = (result == 0);
+}
+
+macro additionWithCarry16(operand1, operand2, result) {
+	result = operand1 + operand2 + zext(C);
+	local x15:1 = operand1[15,1];
+	local m15:1 = operand2[15,1];
+	local r15:1 = result[15,1];
+
+	V = (x15 && m15 && !r15) || (!x15 && !m15 && r15);
+	C = (x15 && m15) || (m15 && !r15) || (!r15 && x15);
+	N = (result s< 0);
+	Z = (result == 0);
+}
+
+macro addition_flags16(operand1, operand2, result) {
+	C = carry(operand1, operand2);
+	V = scarry(operand1, operand2);
+	N = (result s< 0);
+	Z = (result == 0);
+}
+
+macro subtraction_flags8(operand1, operand2, result) {	
+	V = sborrow(operand1,operand2);
+	N = (result s< 0);
+	Z = (result == 0);
+	local a7 = (operand1[7,1] == 1);
+	local b7 = (operand2[7,1] == 1);
+	local r7 = (result[7,1] == 1);
+	C = (((!a7) && b7) || (b7 && r7) || (r7 && (!a7)));
+}
+
+macro subtractionWithCarry8(operand1, operand2, result) {
+	result = operand1 + C - operand2;
+	N = (result s< 0);
+	Z = (result == 0);
+	local x7 = operand1[7,1];
+	local m7 = operand2[7,1];
+	local r7 = result[7,1];
+	C = (!x7 && m7) || (m7 && r7) || (r7 && !x7);
+	V = (x7 && !m7 && !r7) || (!x7 && m7 && r7);
+}
+
+macro subtraction_flags16(operand1, operand2, result) {	
+	V = sborrow(operand1,operand2);
+	N = (result s< 0);
+	Z = (result == 0);
+	local a15 = operand1[15,1];
+	local b15 = operand2[15,1];
+	local r15 = result[15,1];
+	C = (!a15 && b15) || (b15 && r15) || (r15 && !a15);
+}
+
+macro subtractionWithCarry16(operand1, operand2, result) {
+	result = operand1 + zext(C) - operand2;
+	N = (result s< 0);
+	Z = (result == 0);
+	local x15 = operand1[15,1];
+	local m15 = operand2[15,1];
+	local r15 = result[15,1];
+	C = (!x15 && m15) || (m15 && r15) || (r15 && !x15);
+	V = (x15 && !m15 && !r15) || (!x15 && m15 && r15);
+}
+
+
+# pushes a 2 byte operand onto the stack
+macro push2(operand) {
+	*:2 SPextended = operand;
+	SPextended = SPextended - 2;
+}
+
+macro pull2(operand)
+{
+	SPextended = SPextended + 2;
+	local pullValue:2 = * SPextended;
+	operand = pullValue;
+}
+
+# pushes a 1 byte operand onto the stack
+macro push1(operand) {
+	SPextended = SPextended + 1;
+	*:1 SPextended = operand;
+	SPextended = SPextended - 2;
+}
+
+macro pull1(operand)
+{
+	SPextended = SPextended + 2;
+	local pullValue:1 = * SPextended;
+	operand = pullValue;
+	SPextended = SPextended - 1;
+}
+
+macro clearFlags()
+{
+	N = 0;
+	Z = 1;
+	V = 0;
+	C = 0;
+}
+
+macro processFlags1(operand1)
+{
+	V = 0; 
+	Z = (operand1 == 0);
+	N = (operand1 s< 0);
+}
+
+macro shiftFlags(operand1)
+{
+	Z = (operand1 == 0);
+	N = (operand1 s< 0);
+	V = N ^^ C;
+}
+
+macro decFlags(operand1, operand2)
+{
+	Z = (operand2 == 0);
+	N = (operand2 s< 0);
+	V = sborrow(operand1,1);
+}
+
+macro incFlags(operand1)
+{
+	Z = (operand1 == 0);
+	N = (operand1 s< 0);
+	V = scarry(operand1, 1);
+}
+
+macro rightShiftFlags(operand1, operand2)
+{
+	C = operand1[0,1];
+	Z = (operand2 == 0);
+	N = 0;
+	V = C;
+}
+
+macro negFlags(operand1, operand2)
+{
+	C = (operand1 != 0);
+	Z = (operand2 == 0);
+	N = (operand2 s< 0);
+	V = sborrow(0,operand2);
+}
+
+macro testFlags(operand1)
+{
+	N = (operand1 s< 0);
+	Z = (operand1 == 0);
+	V = 0;
+	C = 0;
+}
+
+
+# truncate 32 bit register varnode to 20 bits
+# unlikely to be needed in normal operation, so commented out
+macro checkIndexOverflow(operand)
+{
+#	operand = operand & 0x0FFFFF;
+}
+
+macro syncCCRtoFlags()
+{
+	CCR_PK[15,1] = S;
+	CCR_PK[14,1] = MV;
+	CCR_PK[13,1] = H;
+	CCR_PK[12,1] = EV;
+	CCR_PK[11,1] = N;
+	CCR_PK[10,1] = Z;
+	CCR_PK[9,1] = V;
+	CCR_PK[8,1] = C;
+	CCR_PK[5,3] = IPF[0,3];
+	CCR_PK[4,1] = SM;
+	CCR_PK[0,4] = PCextended[16,4];
+}
+
+macro syncFlagsToCCR()
+{
+	S = CCR_PK[15,1];
+	MV = CCR_PK[14,1];
+	H = CCR_PK[13,1];
+	EV = CCR_PK[12,1];
+	N = CCR_PK[11,1];
+	Z = CCR_PK[10,1];
+	V = CCR_PK[9,1];
+	C = CCR_PK[8,1];
+	IPF = CCR_PK[5,3];
+	SM = CCR_PK[4,1];
+}
+
+macro buildK()
+{
+	K[12,4] = EK[16,4];
+	K[8,4] = XKE[0,4];
+	K[4,4] = YKE[0,4];
+	K[0,4] = ZKE[0,4];
+}
+
+macro syncToK()
+{
+	EK = zext(K[12,4]) << 16;
+	XKE = zext(K[12,4]);
+	YKE = zext(K[4,4]);
+	ZKE = zext(K[0,4]);
+}
+
+macro checkOverflowAM()
+{
+	local MSByte:1 = AM_MSB;
+	MSByte = MSByte << 4;
+	MSByte = MSByte s>> 4;
+	AM_MSB = MSByte;
+}
+
+macro computeEV()
+{
+	EV = ((AMFull[35,1] == 0) && (AMFull[31,4] != 0)) || ((AMFull[35,1] == 1) && (AMFull[31,4] != 0xF));
+}
+
+# must be executed after DSP operation and before checkOverflowAM() is called
+macro  computeMV()
+{
+	local previousMV = MV;
+	MV = MV || (AMFull[36,1] != AMFull[35,1]); #MV remains set once set, until cleared
+	local MVset:1 = (previousMV==0) && (MV==1);
+	local MVNotSet = (previousMV==0) && (MV==0);
+	SignLatch = (AMFull[35,1] && MVset) || (SignLatch && MVNotSet);
+}
+
+################################################################
+# Addressing modes
+################################################################
+
+
+###################################################################
+# addressing mode pattern 1 for byte based instructions
+# applies to ASL, ASR, CLR, COM, DEC, INC, LSR, NEG, ROL, ROR, TST
+# covers addressing modes indexed8, indexed16, and extended
+# instruction matches pattern on op7_6 and op3_0
+# returns a byte value
+##################################################################
+
+operandsMemByte1: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8
+{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:1 addr;}
+
+operandsMemByte1: simm16,op5_4b	is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:1 addr;}
+
+operandsMemByte1: imm16	is prefix=1 & op5_4=0b11; imm16
+{ local addr:4 = zext(imm16:2) + EK; export *:1 addr;}
+
+###################################################################
+# addressing mode pattern 2 for byte based instructions
+# applies to ADCA, ADCB, ADDA, ADDB, ANDA, ANDB, BITA, BITB
+# CMPA, CMPB, EORA, EORB, LDAA, LDAB, ORAA, ORAB
+# SBCA, SBCB, STAA, STAB, SUBA, SUBB
+# covers addressing modes defined in byte mode pattern 4,
+# plus immediate 8 and accumulator E indexed
+# instruction matches pattern on op7_6 and op3_0
+# returns a byte value
+##################################################################
+
+operandsMemByte2: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8
+{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:1 addr;}
+
+operandsMemByte2: simm16,op5_4b	is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:1 addr;}
+
+operandsMemByte2: imm16	is prefix=1 & op5_4=0b11; imm16 { local addr:4 = zext(imm16:2) + EK; export *:1 addr;}
+
+operandsMemByte2: "#"^imm8 is prefix=0 & op5_4=0b11; imm8 { export *[const]:1 imm8;}
+
+operandsMemByte2: "E",op5_4b is prefix=2 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b
+{ local addr:4 = op5_4a:4 + sext(E); export *:1 addr;}
+
+###################################################################
+# addressing mode pattern 3 for byte based instructions
+# mask byte is inserted
+# between the opcode and the addressing operands
+# applies to BCLR, BSET
+# instruction matches pattern on op7_6 and op3_0
+# returns a byte value
+##################################################################
+
+operandsMemByte3: imm8,op5_4b is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; mask8 ; imm8 
+{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:1 addr; } 
+
+operandsMemByte3: simm16,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; mask8 ; simm16 
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:1 addr; } 
+
+operandsMemByte3: imm16	is prefix=0 & op5_4=0b11; mask8 ; imm16  { local addr:4 = zext(imm16:2) + EK; export *:1 addr; } 
+
+############################################################
+# addressing mode pattern 1 for word based instructions
+# applies to ASLW, ASRW, BCLRW, BSETW, CLRW, COMW, DECW
+# INCW, LSRW, NEGW, ROLW, RORW, TSTW
+# covers addressing modes indexed16 and extended
+# instruction matches pattern on op7_6=0b00 and op3_0
+# returns a word value
+############################################################
+
+operandsMemWord1: simm16,op5_4b is prefix=2 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
+
+operandsMemWord1: imm16	is prefix=2 & op5_4=0b11; imm16  { local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
+
+############################################################
+# addressing mode pattern 2 for word based instructions
+# applies to ADCE, ANDE, CPE, EORE, LDE, ORE, SBCE, SUBE
+# also used for STE with immediate16 filtered out by op7_6=0b01
+# also used for ADDE with explicit immediate8 support - note sign extended
+# covers addressing modes immediate16, indexed16 and extended
+# instruction matches pattern on op7_7=0 & op3_0
+# returns a word value
+############################################################
+
+operandsMemWord2: "#"^imm16 is prefix=3 & op7_6=0b00 & op5_4=0b11; imm16  { export *[const]:2 imm16;}
+
+operandsMemWord2: simm16,op5_4b is prefix=3 & op7_6=0b01 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
+
+operandsMemWord2: imm16	is prefix=3 & op7_6=0b01 & op5_4=0b11; imm16
+{ local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
+
+operandsMemWord2: "#"^imm8 is  prefix=0 & op8=0x7C; imm8  {local addr:2 = sext(imm8:1); export *[const]:2 addr;}
+
+############################################################
+# addressing mode pattern 4 for word based instructions
+# applies to STS, STX, STY, STZ
+# instruction matches pattern on op7_6 and op3_0
+# returns a word value
+############################################################
+
+operandsMemWord4: simm16,op5_4b is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
+
+operandsMemWord4: imm16 is prefix=1 & op5_4=0b11; imm16
+{ local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
+
+operandsMemWord4: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8 
+{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:2 addr; } 
+
+############################################################
+# addressing mode pattern 5 for word based instructions
+# applies to CPS, CPX, CPY, CPZ, LDS, LDX, LDY, LDZ
+# instruction matches pattern on
+# op3_0 and op7_6 and prefix=(0 or 1)
+# or
+# op3_0 and op7_6 and prefix=3
+# due to new pattern introduced by immediate16
+# extends word 4 and adds immediate 16
+# returns a word value
+############################################################
+
+operandsMemWord5: simm16,op5_4b is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
+
+operandsMemWord5: imm16 is prefix=1 & op5_4=0b11; imm16 { local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
+
+operandsMemWord5: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8 
+{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:2 addr; } 
+
+operandsMemWord5: "#"^imm16	is prefix=3 & op5_4=0b11; imm16 { export *[const]:2 imm16;}
+
+############################################################
+# addressing mode pattern 6 for word based instructions
+# which applies to
+# ADCD, ANDD, CPD, EORD, LDD, ORD, SBCD, SUBD
+# STD (does not support immediate16 - would decode but 0x37BA instruction does not exist)
+# instruction matches pattern on op7 and op3_0
+# covers addressing modes indexed8, indexed16, extended, accumulator E, immediate16
+# ADDD instruction adds immediate 8 with direct match to op8 pattern, note imm8 is sign extended
+# returns a word value
+############################################################
+
+operandsMemWord6: imm8,op5_4b is prefix=0 & op6_6=0b0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8
+{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:2 addr;}
+
+operandsMemWord6: simm16,op5_4b	is prefix=3 & op6_6=0b1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
+
+operandsMemWord6: imm16	is prefix=3 & op6_6=0b1 & op5_4=0b11; imm16 { local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
+
+operandsMemWord6: "E",op5_4b is prefix=2 & op6_6=0b0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b
+{ local addr:4 = op5_4a:4 + sext(E); export *:2 addr;}
+
+operandsMemWord6: "#"^imm16 is prefix=3 & op6_6=0b0 & op5_4=0b11; imm16 { export *[const]:2 imm16;}
+
+operandsMemWord6: "#"^imm8 is prefix=0 & op8=0xFC; imm8 {local addr:2 = sext(imm8:1); export *[const]:2 addr;}
+
+############################################################
+# addressing mode pattern 8,9 for word and byte based instructions
+# applies to MOVB, MOVW
+# covers addressing modes index post modified and extended
+# instruction pattern matching is
+#  (prefix 0 and op7_2 = 0b001100) or (prefix=3 & op7_1 = 0b1111111)
+# movb is op0_0=0, and movW is 0_0=1
+# returns a target address
+############################################################
+
+
+# source address is X
+operandsMemWordAddr8: simm8,"X" is prefix=0 & op1_1=0 ; simm8 ; imm16
+{
+	local addr:4 = IXE;
+	local Xoffset:1 = simm8;
+	IXE = IXE + sext(Xoffset);
+    checkIndexOverflow(IXE);
+	export *:2 addr;
+}
+
+#source address is extended
+operandsMemWordAddr8: imm16 is prefix=0 & op1_1=1 ; simm8 ; imm16
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:2 addr;	
+}
+
+#source address is extended
+operandsMemWordAddr8: imm16 is prefix=3 & op8 ; imm16 ; imm16a
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:2 addr;	
+}
+
+#destination address is extended
+operandsMemWordAddr9: imm16 is prefix=0 & op1_1=0 ; simm8 ; imm16
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:2 addr;	
+}
+
+#destination address is X
+operandsMemWordAddr9: simm8,"X" is prefix=0 & op1_1=1 ; simm8
+{
+	local addr:4 = IXE;
+	local Xoffset:1 = simm8;
+	IXE = IXE + sext(Xoffset);
+    checkIndexOverflow(IXE);
+	export *:2 addr;
+}
+
+#destination address is extended
+operandsMemWordAddr9: imm16 is prefix=3 & op8 ; imm16a ; imm16
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:2 addr;	
+}
+
+
+# source address is X
+operandsMemByteAddr8: simm8,"X" is prefix=0 & op1_1=0 ; simm8 ; imm16
+{
+	local addr:4 = IXE;
+	local Xoffset:1 = simm8;
+	IXE = IXE + sext(Xoffset);
+    checkIndexOverflow(IXE);
+	export *:1 addr;
+}
+
+#source address is extended
+operandsMemByteAddr8: imm16 is prefix=0 & op1_1=1 ; simm8 ; imm16
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:1 addr;	
+}
+
+#source address is extended
+operandsMemByteAddr8: imm16 is prefix=3 & op8 ; imm16 ; imm16a
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:1 addr;	
+}
+
+#destination address is extended
+operandsMemByteAddr9: imm16 is prefix=0 & op1_1=0 ; simm8 ; imm16
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:1 addr;	
+}
+
+#destination address is X
+operandsMemByteAddr9: simm8,"X" is prefix=0 & op1_1=1 ; simm8
+{
+	local addr:4 = IXE;
+	local Xoffset:1 = simm8;
+	IXE = IXE + sext(Xoffset);
+    checkIndexOverflow(IXE);
+	export *:1 addr;
+}
+
+#destination address is extended
+operandsMemByteAddr9: imm16 is prefix=3 & op8 ; imm16a ; imm16
+{
+	local offset16:2 = imm16;
+	local addr:4 = zext(offset16) + EK;
+	export *:1 addr;	
+}
+
+
+
+
+############### misc patterns ####################################
+
+# note index extension register is not used
+# code location from index and 20bit offset
+operand20: addr,op5_4b is (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b); imm8; simm16
+[addr = (((op5_4a & 0xffff) << 4) + ((((imm8 & 0x0F) << 16) + simm16) << 4)) >> 4;]
+{
+	export *:1 addr;
+}
+
+# code location from 20 bit address
+operand20: addrTarget is (prefix=0 & op5_4=0b11) ; imm8; imm16
+[addrTarget = ((imm8 & 0x0F) << 16) + imm16;]
+{
+	export *:1 addrTarget;
+}
+
+# 8 bit immediate, returns 8 bit value
+iopr8: "#"imm8	is imm8	{ export *[const]:1 imm8;}	
+
+# 16 bit immediate, returns 16 bit value
+iopr16: "#"imm16	is imm16 { export *[const]:2 imm16;}
+
+# 8 bit immediate, returns value that is immediate operand
+immediate20: "#"imm8	is prefix=0 & op8; imm8	# 8 bit immediate, returns 20 bit value
+{
+	local op1:1 = imm8;
+	local adjust20:4 = sext(op1);
+	export *[const]:4 adjust20;
+}
+
+# 16 bit immediate, returns value that is immediate operand
+immediate20: "#"imm16	is prefix=3 & op8; imm16		# 16 bit immediate, returns 20 bit value
+{
+	local op1:2 = imm16;
+	local adjust20:4 = sext(op1);
+	export *[const]:4 adjust20;
+}
+
+
+################################################################
+# Branches
+################################################################
+
+# branch with relative 8 bit signed operand
+# PC is inst_start+6 when executed due to CPU pipelining, so this is the assumption used to build the offset
+# odd offsets should be rounded down - not implemented
+dest_rel8: reloc is	simm8	[reloc = inst_start + 6 + simm8;]
+{
+	export *:1 reloc;
+}
+
+# branch with relative 16 bit signed operand
+# odd offsets should be rounded down - not implemented
+dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
+{
+	export *:1 reloc;
+}
+
+###############################################################
+# instruction parsing for code pages
+###############################################################
+
+:^instruction is phase=0 & op8=0x17 ;  instruction [ prefix=1;  phase=1;]  { }
+:^instruction is phase=0 & op8=0x27 ;  instruction [ prefix=2;  phase=1;]  { }
+:^instruction is phase=0 & op8=0x37 ;  instruction [ prefix=3;  phase=1;]  { }
+:^instruction is phase=0 & instruction [ prefix=0; phase=1;]  { }
+
+# page code is stripped off, and prefix is set to appropriate value
+
+
+
+################################################################
+# Constructors
+################################################################
+
+:ABA is prefix=3 & op8=0x0B
+{
+	local result:1 = A + B;
+	local a3:1 = A[3,1];
+	local b3:1 = B[3,1];
+	local not_r3:1 = !result[3,1];
+	H = (a3 && b3) || (b3 && not_r3) || (not_r3 && a3);	
+	N = (result s< 0);
+	Z = (result == 0);
+	V = scarry(A,B);
+	C = carry(A,B);	
+	A = result;
+}
+
+:ABX is prefix=3 & op8=0x4F
+{
+	IXE = IXE + zext(B);
+	checkIndexOverflow(IXE);
+}
+
+:ABY is prefix=3 & op8=0x5F
+{
+	IYE = IYE + zext(B);
+	checkIndexOverflow(IYE);
+}
+
+:ABZ  is prefix=3 & op8=0x6F
+{
+	IZE = IZE + zext(B);
+	checkIndexOverflow(IZE);
+}
+
+:ACE	is prefix=3 & op8=0x22
+{
+	AM_Top3 = AM_Top3 + sext(E);
+	computeMV();
+	checkOverflowAM();
+	computeEV();
+}		
+
+:ACED	is prefix=3 & op8=0x23
+{
+	local tmp:4 = (zext(E) <<16 ) + zext(D);
+	AMFull = AMFull + sext(tmp);
+	computeMV();
+	checkOverflowAM();
+	computeEV();
+}		
+
+
+:ADCA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0011) ... & operandsMemByte2 
+{
+	local op1 = operandsMemByte2;
+
+	local result:1;
+	additionWithCarry8(A, op1, result);
+	
+	A = result;
+}
+
+
+:ADCB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0011) ... & operandsMemByte2  
+{
+	local op1 = operandsMemByte2;
+
+	local result:1;
+	additionWithCarry8(B, op1, result);
+	
+	B = result;
+}
+
+:ADCD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0011) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	local result:2;
+	additionWithCarry16(D, op1, result);
+	
+	D = result;	
+}
+
+:ADCE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0011) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	local result:2;
+	additionWithCarry16(E, op1, result);
+	
+	E = result;
+}
+
+:ADDA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0001) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	local result:1 = A + op1;
+	addition_flags8(A, op1, result);
+	
+	A = result;
+}
+
+:ADDB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0001) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	local result:1 = B + op1;
+	addition_flags8(B, op1, result);
+	
+	B = result;
+}
+
+:ADDD operandsMemWord6	is ((op7_7=0b1 & op3_0=0b0001) | (prefix=0 & op8=0xFC)) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	local result:2 = D + op1;
+	addition_flags16(D, op1, result);
+	
+	D = result;
+}
+
+:ADDE operandsMemWord2	is ((prefix=3 & op7_7 = 0b0 & op3_0=0b0001) | (prefix=0 & op8=0x7C)) ... & operandsMemWord2 # includes immediate 8
+{
+	local op1:2 = operandsMemWord2;
+
+	local result:2 = E + op1;
+	addition_flags16(E, op1, result);
+	
+	E = result;
+}
+
+:ADE 	is prefix=2 & op8=0x78
+{
+	local result:2 = D + E;
+	addition_flags16(D, E, result);
+	
+	E = result;
+}
+
+:ADX	is prefix=3 & op8=0xCD
+{
+	IXE = IXE + sext(D);
+	checkIndexOverflow(IXE);
+}
+
+:ADY	is prefix=3 & op8=0xDD
+{
+	IYE = IYE + sext(D);
+	checkIndexOverflow(IYE);
+}
+
+:ADZ	is prefix=3 & op8=0xED
+{
+	IZE = IZE + sext(D);
+	checkIndexOverflow(IZE);
+}
+
+:AEX	is prefix=3 & op8=0x4D
+{
+	IXE = IXE + sext(E);
+	checkIndexOverflow(IXE);
+}
+
+:AEY	is prefix=3 & op8=0x5D
+{
+	IYE = IYE + sext(E);
+	checkIndexOverflow(IYE);
+}
+
+:AEZ	is prefix=3 & op8=0x6D
+{
+	IZE = IZE + sext(E);
+	checkIndexOverflow(IZE);
+}
+
+:AIS immediate20	is ((prefix=0 | prefix=3) & op8=0x3F) ... & immediate20
+{
+	SPextended = SPextended + immediate20;
+#	checkIndexOverflow(SPextended);
+}
+
+:AIX immediate20	is ((prefix=0 | prefix=3) & op8=0x3C) ... & immediate20
+{
+	IXE = IXE + immediate20;
+#	checkIndexOverflow(IXE);
+}
+
+:AIY immediate20	is ((prefix=0 | prefix=3) & op8=0x3D) ... & immediate20
+{
+	IYE = IYE + immediate20;
+#	checkIndexOverflow(IYE);
+}
+
+:AIZ immediate20	is ((prefix=0 | prefix=3) & op8=0x3E) ... & immediate20
+{
+	IZE = IZE + immediate20;	
+#	checkIndexOverflow(IZE);
+}
+
+:ANDA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0110) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	A = A & op1;
+	processFlags1(A);
+}
+
+
+:ANDB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0110) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	B = B & op1;
+	processFlags1(B);
+}
+
+:ANDD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0110) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	D = D & op1;
+	processFlags1(D);
+}
+
+:ANDE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0110) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	E = E & op1;
+	processFlags1(E);
+}
+
+:ANDP iopr16	is prefix=3 & op8=0x3A; iopr16
+{
+	local op1:2 = iopr16;
+	op1 = op1 | 0x000F;
+	S = S && op1[15,1];
+	MV = MV && op1[14,1];
+	H = H && op1[13,1];
+	EV = EV && op1[12,1];
+	N = N && op1[11,1];
+	Z = Z && op1[10,1];
+	V = V && op1[9,1];
+	C = C && op1[8,1];
+	IPF = IPF & op1[5,3];
+	SM = SM && op1[4,1];
+}
+
+:ASL operandsMemByte1	is (op7_6=0b00 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10 | (prefix=1 & op5_4=0b11)) & op3_0=0b0100) ... & operandsMemByte1 
+{
+	
+	tmp:1 = operandsMemByte1;
+	C = (tmp s< 0);
+	tmp = tmp << 1;
+	operandsMemByte1 = tmp;
+	shiftFlags(tmp);	
+}
+
+:ASLA	is prefix=3 & op8=0x04 
+{
+	C = (A s< 0);
+	A = A << 1;
+	shiftFlags(A);
+}
+
+:ASLB	is prefix=3 & op8=0x14 
+{
+	C = (B s< 0);
+	B = B << 1;
+	shiftFlags(B);	
+}
+
+:ASLD	is prefix=2 & op8=0xF4 
+{
+	C = (D s< 0);
+	D = D << 1;
+	shiftFlags(D);	
+}
+
+:ASLE	is prefix=2 & op8=0x74 
+{
+	C = (E s< 0);
+	E = E << 1;
+	shiftFlags(E);	
+}
+
+:ASLM	is prefix=2 & op8=0xB6
+{
+	C = AMFull[35,1];
+	AMFull = AMFull << 1;
+	computeMV();
+	checkOverflowAM();
+	N = AMFull[35,1];
+	computeEV();
+}	
+
+:ASLW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0100) ... & operandsMemWord1
+{
+	local tmp:2 = operandsMemWord1;
+
+	C = (tmp s< 0);
+	tmp = tmp << 1;
+	operandsMemWord1 = tmp;
+	shiftFlags(tmp);	
+}
+
+:ASR operandsMemByte1	is (op3_0=0b1101 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	tmp:1 = operandsMemByte1;
+	C = tmp[0,1];
+	tmp = tmp s>> 1;
+	operandsMemByte1 = tmp;
+	shiftFlags(tmp);	
+}
+
+:ASRA is	prefix=3 & op8=0x0D
+{
+	C = A[0,1];
+	A = A s>> 1;
+	shiftFlags(A);	
+}
+
+:ASRB is	prefix=3 & op8=0x1D
+{
+	C = B[0,1];
+	B = B s>> 1;
+	shiftFlags(B);	
+}
+
+:ASRD is	prefix=2 & op8=0xFD
+{
+	C = D[0,1];
+	D = D s>> 1;
+	shiftFlags(D);	
+}
+
+:ASRE is	prefix=2 & op8=0x7D
+{
+	C = E[0,1];
+	E = E s>> 1;
+	shiftFlags(E);	
+	
+}
+
+:ASRM is	prefix=2 & op8=0xBA
+{
+	C = AMFull[0,1];
+	AMFull = AMFull s>> 1;
+	N = AMFull[35,1];
+	computeEV();
+}
+
+:ASRW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1101) ... & operandsMemWord1 
+{
+	local tmp:2 = operandsMemWord1;
+
+	C = tmp[0,1];
+	tmp = tmp >> 1;
+	operandsMemWord1 = tmp;
+	shiftFlags(tmp);	
+}
+
+
+:BCC dest_rel8 is prefix=0 & op8=0xB4; dest_rel8
+{
+	if (C == 0) goto dest_rel8;
+}
+
+# BCLR #############################################
+
+:BCLR operandsMemByte3,iopr8	is ((op7_6=0b00 & op3_0=0b1000) ; iopr8) ...& operandsMemByte3
+{
+	local msk8:1 = iopr8;
+	local op1:1 = operandsMemByte3;
+	op1 = op1 & ~msk8;
+	operandsMemByte3 = op1;
+	processFlags1(op1); 
+}
+
+:BCLRW operandsMemWord1, iopr16	is ((prefix=2 & op7_6=0b00 & op3_0=0b1000) ... & operandsMemWord1); iopr16
+{
+	local msk16:2 = iopr16;
+	local op1:2 = operandsMemWord1;
+
+	op1 = op1 & ~msk16;
+	operandsMemWord1 = op1;
+	processFlags1(op1); 
+}
+
+:BCS dest_rel8 is prefix=0 & op8=0xB5; dest_rel8
+{
+	if (C == 1) goto dest_rel8;
+}
+
+:BEQ dest_rel8 is prefix=0 & op8=0xB7; dest_rel8
+{
+	if (Z == 1) goto dest_rel8;
+}
+
+:BGE dest_rel8 is prefix=0 & op8=0xBC; dest_rel8
+{
+	if ((N ^^ V) == 0) goto dest_rel8;
+}
+
+:BGND is	prefix=3 & op8=0xA6
+{
+	backgroundDebugMode();
+}
+
+:BGT dest_rel8 is prefix=0 & op8=0xBE; dest_rel8
+{
+	if ((Z || (N ^^ V)) == 0) goto dest_rel8;
+}
+
+:BHI dest_rel8 is prefix=0 & op8=0xB2; dest_rel8
+{
+	if ((C || Z) == 0) goto dest_rel8;
+}
+
+:BITA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b1001) ... & operandsMemByte2
+{
+	local op1:1 = operandsMemByte2;
+	local result:1 = A & op1;
+	processFlags1(result); 
+}
+
+:BITB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b1001) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+	local result:1 = B & op1;
+	processFlags1(result); 
+}
+
+:BLE dest_rel8 is prefix=0 & op8=0xBF; dest_rel8
+{
+	if ((Z || (N ^^ V)) == 1) goto dest_rel8;
+}
+
+:BLS dest_rel8 is prefix=0 & op8=0xB3; dest_rel8
+{
+	if ((C || Z) == 1) goto dest_rel8;
+}
+
+:BLT dest_rel8 is prefix=0 & op8=0xBD; dest_rel8
+{
+	if ((N ^^ V) ==1) goto dest_rel8;
+}
+
+:BMI dest_rel8 is prefix=0 & op8=0xBB; dest_rel8
+{
+	if (N == 1) goto dest_rel8;
+}
+
+:BNE dest_rel8 is prefix=0 & op8=0xB6; dest_rel8
+{
+	if (Z == 0) goto dest_rel8;
+}
+
+:BPL dest_rel8 is prefix=0 & op8=0xBA; dest_rel8
+{
+	if (N == 0) goto dest_rel8;
+}
+
+:BRA dest_rel8 is prefix=0 & op8=0xB0; dest_rel8
+{
+	goto dest_rel8;
+}
+
+# BRCLR ##############################
+
+# instruction has variable length addressing mode and variable length branch offset - matched with custom tables as below
+
+# specific opcode pattern matching for this instruction - retrieves the target memory location
+operandsMemByte4: imm8,op5_4b 	is (op7_7=0b1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b) ; mask8 ; imm8 ; imm8a
+{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:1 addr;}
+
+# specific opcode pattern matching for this instruction - retrieves the target memory location
+operandsMemByte4: simm16,op5_4b is (op7_7=0b0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b); mask8 ; simm16 ; imm16a
+{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:1 addr;}
+
+# specific opcode pattern matching for this instruction - retrieves the target memory location
+operandsMemByte4: imm16 is (op7_7=0b0 & op5_4=0b11); mask8 ; imm16 ; imm16a
+{ local addr:4 = zext(imm16:2) + EK; export *:1 addr;}
+
+# used by BRCLR and BRSET - retrieves the branch location
+branchTarget4: dest_rel8 is op7_7=0b1 ; mask8 ; imm8 ; dest_rel8 { export dest_rel8;}
+branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export dest_rel16;}
+
+
+:BRCLR operandsMemByte4,iopr8,branchTarget4	is (((prefix=0 &((op7_6=0b11 & op3_0=0b1011) | (op7_6=0b00 & op3_0=0b1010))) ; iopr8) ...& operandsMemByte4) ...& branchTarget4
+{
+	local msk8:1 = iopr8;
+	local op1:1 = operandsMemByte4;
+
+	local result:1 = op1 & msk8;
+	if (result == 0) goto branchTarget4;
+}
+
+:BRN                 is prefix=0 & op8=0xB1 ; imm8
+{
+}
+
+
+# BRSET ##############################
+
+# specific opcode pattern matching for this instruction - retrieves the target memory location
+
+:BRSET operandsMemByte4,iopr8,branchTarget4	is (((prefix=0 &((op7_6=0b10 & op3_0=0b1011) | (op7_6=0b00 & op3_0=0b1011))) ; iopr8) ...& operandsMemByte4) ...& branchTarget4
+{
+	local msk8:1 = iopr8;
+	local op1:1 = operandsMemByte4;
+
+	local result:1 = ~op1 & msk8;
+	if (result == 0) goto branchTarget4;
+}
+
+
+# BSET #############################################
+
+:BSET operandsMemByte3,iopr8	is ((op7_6=0b00 & op3_0=0b1001) ; iopr8) ...& operandsMemByte3
+{
+	local msk8:1 = iopr8;
+	local op1:1 = operandsMemByte3;
+	op1 = op1 | msk8;
+	operandsMemByte3 = op1;
+	processFlags1(op1); 
+}
+
+:BSETW operandsMemWord1, iopr16	is ((prefix=2 & op7_6=0b00 & op3_0=0b1001) ... & operandsMemWord1); iopr16
+{
+	local msk16:2 = iopr16;
+	local op1:2 = operandsMemWord1;
+
+	op1 = op1 | msk16;
+	operandsMemWord1 = op1;
+	processFlags1(op1); 
+}
+
+:BSR dest_rel8 is prefix=0 & op8=0x36; dest_rel8
+{
+	local tmp_PCfull:4 = inst_next+4;
+	local tmp_PC:2 = tmp_PCfull:2;
+	push2( tmp_PC );
+	syncCCRtoFlags();
+	local tmp = CCR_PK;
+	push2( tmp );
+	
+	call dest_rel8;
+}
+
+:BVC dest_rel8 is prefix=0 & op8=0xB8; dest_rel8
+{
+	if (V == 0) goto dest_rel8;
+}
+
+:BVS dest_rel8 is prefix=0 & op8=0xB9; dest_rel8
+{
+	if (V == 1) goto dest_rel8;
+}
+
+:CBA                is prefix=3 & op8=0x1B
+{ 
+	tmp:1 = A - B;
+	subtraction_flags8(A, B, tmp);
+}
+
+:CLR operandsMemByte1	is (op3_0=0b0101 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	operandsMemByte1 = 0;
+	clearFlags();
+}
+
+:CLRA    is prefix=3 & op8=0x05 
+{
+	A = 0;
+	clearFlags();
+}
+
+:CLRB    is prefix=3 & op8=0x15 
+{
+	B = 0;
+	clearFlags();
+}
+
+:CLRD   is prefix=2 & op8=0xF5 
+{
+	D = 0;
+	clearFlags();
+}
+
+:CLRE   is prefix=2 & op8=0x75 
+{
+	E = 0;
+	clearFlags();
+}
+
+:CLRM is prefix=2 & op8=0xB7
+{
+	AMFull=0;
+	MV = 0;
+	EV = 0;
+}
+
+:CLRW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0101) ... & operandsMemWord1 
+{
+	operandsMemWord1 = 0;
+	clearFlags();
+}
+
+:CMPA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b1000) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	local tmp:1 = A - op1;
+	subtraction_flags8(A, op1, tmp);
+}
+
+:CMPB operandsMemByte2 is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b1000) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	local tmp:1 = B - op1;
+	subtraction_flags8(B, op1, tmp);
+}
+
+:COM operandsMemByte1	is (op3_0=0b0000 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	local tmp:1 = ~(operandsMemByte1);
+	operandsMemByte1 = tmp;
+	C = 1;
+	processFlags1(tmp);
+}
+
+:COMA is prefix=3 & op8=0x00 
+{
+	A = ~A;
+	C = 1;
+	processFlags1(A);
+}
+
+:COMB is prefix=3 & op8=0x10 
+{
+	B = ~B;
+	C = 1;
+	processFlags1(B);
+}
+
+:COMD is prefix=2 & op8=0xF0 
+{
+	D = ~D;
+	C = 1;
+	processFlags1(D);
+}
+
+
+:COME is prefix=2 & op8=0x70 
+{
+	E = ~E;
+	C = 1;
+	processFlags1(E);
+}
+
+:COMW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0000) ... & operandsMemWord1 
+{
+	local tmp:2 = ~(operandsMemWord1);
+	operandsMemWord1 = tmp;
+	C = 1;
+	processFlags1(tmp);
+}
+
+:CPD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b1000)  ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	local tmp:2 = D - op1;
+	subtraction_flags16(D, op1, tmp);
+}
+
+:CPE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b1000) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	local tmp:2 = E - op1;
+	subtraction_flags16(E, op1, tmp);
+}
+
+:CPS operandsMemWord5	is (op7_6=0b01 & op3_0=0b1111) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	local tmp:2 = SP - op1;
+	subtraction_flags16(SP, op1, tmp);
+}
+
+:CPX operandsMemWord5	is (op7_6=0b01 &  op3_0=0b1100) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	local tmp:2 = IX - op1;
+	subtraction_flags16(IX, op1, tmp);
+}
+
+:CPY operandsMemWord5	is (op7_6=0b01 & op3_0=0b1101) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	local tmp:2 = IY - op1;
+	subtraction_flags16(IY, op1, tmp);
+}
+ 
+:CPZ operandsMemWord5	is (op7_6=0b01 & op3_0=0b1110) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	local tmp:2 = IZ - op1;
+	subtraction_flags16(IZ, op1, tmp);
+}
+
+:DAA  is prefix=3 & op8=0x21 
+{
+	local Ahigh:1 = A >> 4;
+	local Alow:1 = A & 0x0F;
+	
+	local Add06:1 = ((C==0) && (Ahigh < 9) && (H==0) && (Alow > 9)) || ((C==0) && (Ahigh < 10) && (H==1) && (Alow > 4));
+	local Add60:1 = ((C==0) && (Ahigh > 9) && (H==0) && (Alow < 10)) || ((C==1) && (Ahigh < 3) && (H==0) && (Alow < 10));
+	local Add66:1 = ((C==0) && (Ahigh > 8) && (H==0) && (Alow > 9)) || ((C==0) && (Ahigh > 9) && (H==1) && (Alow < 4)) ||
+	 ((C==1) && (Ahigh < 3) && (H==0) && (Alow > 9)) || ((C==1) && (Ahigh < 4) && (H==1) && (Alow < 4));
+
+	A = A + (Add06 * 0x06) + (Add60 * 0x60) + (Add66 * 0x66);
+	C = 0 + (Add06 || Add66);
+
+	Z = (A == 0);
+	N = (A s< 0);
+	#V is undefined
+}
+
+:DEC operandsMemByte1	is (op3_0=0b0001 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	tmp:1 = operandsMemByte1;
+	result:1 = tmp - 1;
+	operandsMemByte1 = result;
+	decFlags(tmp, result);
+}
+
+:DECA is prefix=3 & op8=0x01 
+{
+	tmp:1 = A;
+	A = tmp - 1;
+	decFlags(tmp, A);
+}
+
+:DECB is prefix=3 & op8=0x11 
+{
+	tmp:1 = B;
+	B = tmp - 1;
+	decFlags(tmp, B);
+}
+
+:DECW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0001) ... & operandsMemWord1 
+{
+	tmp:2 = operandsMemWord1;
+	result:2 = tmp - 1;
+	operandsMemWord1 = result;
+	decFlags(tmp, result);
+}
+
+:EDIV is prefix=3 & op8=0x28 
+{
+	local tmp:4 = (zext(E) << 16) | (zext(D));
+	local resultQ:4 = tmp / zext(IX);
+	local resultR:4 = tmp % zext(IX);
+	local divisor:4 = zext(IX);
+	IX = resultQ:2;
+	D  = resultR:2;
+	N = (IX s< 0);
+	Z = (IX == 0);
+	V = (resultQ > 0x0000FFFF);
+	local doubleR:4 = 2*resultR;
+	C = (doubleR >= divisor);
+}
+
+:EDIVS is prefix=3 & op8=0x29 
+{
+	local tmp:4 = (sext(E) << 16) | (zext(D));
+	local resultQ:4 = tmp s/ sext(IX);
+	local resultR:4 = tmp s% sext(IX);
+	local divisor:4 = sext(IX);
+	IX = resultQ:2;
+	D  = resultR:2;
+	N = (IX s< 0);
+	Z = (IX == 0);
+	
+	local quotientNegative:1 = (resultQ s< 0);
+	V = ((IX > 0x7FFF) && !quotientNegative) || ((IX > 0x8000) && quotientNegative);
+	
+	local remainderNegative:1 = (resultR s< 0);
+	local divisorNegative:1 = (divisor s< 0);
+	local magnitudeRemainder = (resultR * zext(!remainderNegative)) + ((0-resultR) * zext(remainderNegative));
+	local magnitudeDivisor = (divisor * zext(!divisorNegative)) + ((0-divisor) * zext(divisorNegative));
+	
+	C = ((2 * magnitudeRemainder) >= magnitudeDivisor);
+}
+
+:EMUL is prefix=3 & op8=0x25
+{
+	result:4 = zext(E) * zext(D);
+	E = result(2);
+	D = result:2;
+	N = (result s< 0);
+	Z = (result == 0);
+	C = result[15,1];
+}
+
+:EMULS is prefix=3 & op8=0x26
+{
+	result:4 = sext(E) * sext(D);
+	E = result(2);
+	D = result:2;
+	N = (result s< 0);
+	Z = (result == 0);
+	C = result[15,1];
+}
+
+:EORA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0100) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	A = A ^ op1;
+	processFlags1(A);
+}
+
+:EORB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0100) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	B = B ^ op1;
+	processFlags1(B);
+}
+
+:EORD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0100) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	D = D ^ op1;
+	processFlags1(D);
+}
+
+:EORE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0100) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	E = E ^ op1;
+	processFlags1(E);
+}
+
+:FDIV is prefix=3 & op8=0x2B 
+{
+	V = (IX <= D);
+	C = (IX == 0);
+	tmp:4 = (zext(D) << 16);
+	resultQ:4 = tmp / zext(IX);
+	resultR:4 = tmp % zext(IX);
+	IX = resultQ:2;
+	D  = resultR:2;
+	Z = (IX == 0);
+}
+
+:FMULS is prefix=3 & op8=0x27
+{
+	V = (E == 0x8000) && (D == 0x8000);
+	local result:4 = sext(E) * sext(D);
+	result = result << 1;
+	E = result(2);
+	D = result:2;
+	N = (result s< 0);
+	Z = (result == 0);
+	C = result[15,1];
+}
+
+:IDIV is prefix=3 & op8=0x2A
+{
+	C = (IX == 0);
+	resultQ:2 = D / IX;
+	resultR:2 = D % IX;
+	IX = resultQ;
+	D  = resultR;
+	Z = (IX == 0);
+	V = 0;
+}
+
+:INC operandsMemByte1	is (op3_0=0b0011 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	local tmp:1 = operandsMemByte1;
+
+	local result:1 = tmp + 1;
+	operandsMemByte1 = result;
+	incFlags(result);
+}
+
+:INCA is prefix=3 & op8=0x03 
+{
+	tmp:1 = A;
+	A = tmp + 1;
+	incFlags(A);
+}
+
+:INCB is prefix=3 & op8=0x13 
+{
+	tmp:1 = B;
+	B = tmp + 1;
+	incFlags(B);
+}
+
+:INCW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0011) ... & operandsMemWord1 
+{
+	local tmp:2 = operandsMemWord1;
+
+	local result:2 = tmp + 1;
+	operandsMemWord1 = result;
+	incFlags(result);
+}
+
+:JMP operand20 is ((op7_6=0b01 & op3_0=0b1011) | op8=0x7A) ...& operand20
+{
+	goto operand20;
+}
+
+:JSR operand20 is ((op7_6=0b10 & op3_0=0b1001) | op8=0xFA) ...& operand20
+{
+	local tmp_PCfull:4 = inst_next+2;
+	local tmp_PC:2 = tmp_PCfull:2;
+	push2( tmp_PC );
+	syncCCRtoFlags();
+	local tmp = CCR_PK;
+	push2( tmp );
+	
+	call operand20;	
+}
+
+:LBCC dest_rel16 is prefix=3 & op8=0x84; dest_rel16
+{
+	if (C == 0) goto dest_rel16;
+}
+
+:LBCS dest_rel16 is prefix=3 & op8=0x85; dest_rel16
+{
+	if (C == 1) goto dest_rel16;
+}
+
+:LBEQ dest_rel16 is prefix=3 & op8=0x87; dest_rel16
+{
+	if (Z == 1) goto dest_rel16;
+}
+
+:LBEV dest_rel16 is prefix=3 & op8=0x91; dest_rel16
+{
+	if (EV == 1) goto dest_rel16;
+}
+
+:LBGE dest_rel16 is prefix=3 & op8=0x8C; dest_rel16
+{
+	if ((N ^^ V) == 1) goto dest_rel16;
+}
+
+:LBGT dest_rel16 is prefix=3 & op8=0x8E; dest_rel16
+{
+	if ((Z | (N ^^ V)) == 0) goto dest_rel16;
+}
+
+:LBHI dest_rel16 is prefix=3 & op8=0x82; dest_rel16
+{
+	if ((C | Z) == 0) goto dest_rel16;
+}
+
+:LBLE dest_rel16 is prefix=3 & op8=0x8F; dest_rel16
+{
+	if ((Z | (N ^^ V)) == 1) goto dest_rel16;
+}
+
+:LBLS dest_rel16 is prefix=3 & op8=0x83; dest_rel16
+{
+	if ((C | Z) == 1) goto dest_rel16;
+}
+
+:LBLT dest_rel16 is prefix=3 & op8=0x8D; dest_rel16
+{
+	if ((N ^^ V) == 1) goto dest_rel16;
+}
+
+:LBMI dest_rel16 is prefix=3 & op8=0x8B; dest_rel16
+{
+	if (N == 1) goto dest_rel16;
+}
+
+:LBMV dest_rel16 is prefix=3 & op8=0x90; dest_rel16
+{
+	if (MV == 1) goto dest_rel16;
+}
+
+:LBNE dest_rel16 is prefix=3 & op8=0x86; dest_rel16
+{
+	if (Z == 0) goto dest_rel16;
+}
+
+:LBPL dest_rel16 is prefix=3 & op8=0x8A; dest_rel16
+{
+	if (N == 0) goto dest_rel16;
+}
+
+:LBRA dest_rel16 is prefix=3 & op8=0x80; dest_rel16
+{
+	goto dest_rel16;
+}
+
+:LBRN dest_rel16 is prefix=3 & op8=0x81; dest_rel16
+{
+}
+
+:LBSR dest_rel16 is prefix=2 & op8=0xF9; dest_rel16
+{
+	local tmp_PCfull:4 = inst_next+2;
+	local tmp_PC:2 = tmp_PCfull:2;
+	push2( tmp_PC );
+	syncCCRtoFlags();
+	local tmp = CCR_PK;
+	push2( tmp );
+		
+	call dest_rel16;
+}
+
+:LBVC dest_rel16 is prefix=3 & op8=0x88; dest_rel16
+{
+	if (V == 0) goto dest_rel16;
+}
+
+:LBVS dest_rel16 is prefix=3 & op8=0x89; dest_rel16
+{
+	if (V == 1) goto dest_rel16;
+}
+
+:LDAA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0101) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	A = op1;
+	processFlags1(A);
+}
+
+:LDAB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0101) ... & operandsMemByte2 
+
+{
+	local op1:1 = operandsMemByte2;
+
+	B = op1;
+	processFlags1(B);
+}
+
+:LDD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0101) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	D = op1;
+	processFlags1(D);
+}
+
+:LDE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0101) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	E = op1;
+	processFlags1(E);
+}
+
+:LDED imm16	is prefix=2 & op8=0x71; imm16 
+{
+	local memOffset:2 = imm16;
+	local addr:4 = zext(memOffset) + EK;
+	local op1:2 = * addr;
+	E = op1;
+	op1 = *:2 (addr+2);
+	D = op1;
+}
+
+:LDHI	is prefix=2 & op8=0xB0 
+{
+	local addr:4 = IXE;
+	local op1:2 = * addr;
+	HR = op1;
+	addr = IYE;
+	op1 = *:2 addr;
+	IR = op1;
+}
+
+:LDS operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1111) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	SP = op1;
+	processFlags1(SP);
+}
+
+:LDX operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1100) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	IX = op1;
+	processFlags1(IX);
+}
+ 
+:LDY operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1101) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	IY = op1;
+	processFlags1(IY);
+}
+
+ 
+:LDZ operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1110) ... & operandsMemWord5
+{
+	local op1:2 = operandsMemWord5;
+
+	IZ = op1;
+	processFlags1(IZ);
+}
+
+:LPSTOP is prefix=2 & op8=0xF1 # execute lowPowerStop if S flag is set
+{
+	if (S == 0) goto <skippedNext>;
+	lowPowerStop();
+	<skippedNext>
+}
+
+:LSR operandsMemByte1	is (op3_0=0b1111 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	local tmp:1 = operandsMemByte1;
+	local op1:1 = tmp >> 1;
+	operandsMemByte1 = op1;
+	rightShiftFlags(tmp, op1);
+}
+
+:LSRA is prefix=3 & op8=0x0F 
+{
+	local tmp:1 = A;
+	A = (A >> 1);
+	rightShiftFlags(tmp, A);
+}
+
+:LSRB is prefix=3 & op8=0x1F 
+{
+	local tmp:1 = B;
+	B = (B >> 1);
+	rightShiftFlags(tmp, B);
+}
+
+:LSRD is prefix=2 & op8=0xFF 
+{
+	local tmp:2 = D;
+	D = (D >> 1);
+	rightShiftFlags(tmp, D);
+}
+
+:LSRE is prefix=2 & op8=0x7F 
+{
+	local tmp:2 = E;
+	E = (E >> 1);
+	rightShiftFlags(tmp, E);
+}
+
+:LSRW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1111) ... & operandsMemWord1 
+{
+	local tmp:2 = operandsMemWord1;
+	local op1:2 = tmp >> 1;
+	operandsMemWord1 = op1;
+	rightShiftFlags(tmp, op1);
+}
+
+xo: simm8 is simm8
+{
+	local OffsetByte:1 = simm8;
+	local OffsetFull:4 = sext(OffsetByte);
+	OffsetFull = OffsetFull s>>4;
+	local finalOffset:2 = OffsetFull:2;
+	export *[const]:2 finalOffset;
+}
+
+yo: simm8 is simm8
+{
+	local OffsetByte:1 = simm8;
+	local OffsetFull:4 = sext(OffsetByte);
+	OffsetFull = OffsetFull s>>4;
+	local finalOffset:2 = OffsetFull:2;
+	export *[const]:2 finalOffset;
+}
+
+:MAC xo,yo	is prefix=0 & op8=0x7B ; xo ; yo
+{
+	local result:4 = sext(HR) * sext(IR);
+	result = result << 1;
+	E = result(2);
+	D = result:2;
+	
+	AMFull = AMFull + sext(result);
+	computeMV();
+	checkOverflowAM();
+	computeEV();
+	V = (HR == 0x8000) && (IR == 0x8000);
+	IX = (IX & ~zext(XMSK)) | ((IX + xo) & zext(XMSK));
+	IY = (IY & ~zext(YMSK)) | ((IY + yo) & zext(YMSK));
+	IZ = HR;
+	local addr:4 = IXE;
+	HR = *:2 addr;
+	addr = IYE;
+	IR = *:2 addr;
+}
+	
+:MOVB operandsMemByteAddr8, operandsMemByteAddr9  is ((((prefix=0 & op7_2 = 0b001100) | (prefix=3 & op7_1=0b1111111)) & op0_0=0) ...& operandsMemByteAddr8) ...& operandsMemByteAddr9
+{
+	operandsMemByteAddr9 = operandsMemByteAddr8;
+	
+	local op1:1 = operandsMemByteAddr8;
+	N = (op1 s< 0);
+	Z = (op1 == 0);
+	V = 0;
+}
+
+:MOVW operandsMemWordAddr8, operandsMemWordAddr9 is ((((prefix=0 & op7_2 = 0b001100) | (prefix=3 & op7_1=0b1111111)) & op0_0=1) ...& operandsMemWordAddr8) ...& operandsMemWordAddr9
+{
+	operandsMemWordAddr9 = operandsMemWordAddr8;
+	
+	local op1:2 = operandsMemWordAddr8;
+	N = (op1 s< 0);
+	Z = (op1 == 0);
+	V = 0;
+}
+
+
+:MUL is prefix=3 & op8=0x24
+{
+	D = zext(A) * zext(B);
+	C = (D[7,1] == 1);
+}
+
+:NEG operandsMemByte1	is (op3_0=0b0010 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	local op1:1 = operandsMemByte1;
+	local op2:1 = 0-op1;
+	operandsMemByte1 = op2;
+	negFlags(op1, op2);
+}
+
+:NEGA	is prefix=3 & op8=0x02
+{
+	local op1:1 = A;
+	local op2:1 = 0-op1;
+	A = op2;
+	negFlags(op1, op2);
+}
+
+:NEGB	is prefix=3 & op8=0x12
+{
+	local op1:1 = B;
+	local op2:1 = 0-op1;
+	B = op2;
+	negFlags(op1, op2);
+}
+
+:NEGD	is prefix=2 & op8=0xF2
+{
+	local op1:2 = D;
+	local op2:2 = 0-op1;
+	D = op2;
+	negFlags(op1, op2);
+}
+
+:NEGE	is prefix=2 & op8=0x72
+{
+	local op1:2 = E;
+	local op2:2 = 0-op1;
+	E = op2;
+	negFlags(op1, op2);
+}
+
+:NEGW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0010) ... & operandsMemWord1
+{
+	local op1:2 = operandsMemWord1;
+	local op2:2 = 0-op1;
+	operandsMemWord1 = op2;
+	negFlags(op1, op2);
+}
+
+:NOP is prefix=2 & op8=0x4C
+{
+}
+
+:ORAA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0111) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	A = A | op1;
+	processFlags1(A);
+}
+
+:ORAB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0111) ... & operandsMemByte2 
+{
+	local op1:1 = operandsMemByte2;
+
+	B = B | op1;
+	processFlags1(B);
+}
+
+:ORD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0111) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	D = D | op1;
+	processFlags1(D);
+}
+
+:ORE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0111) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	E = E | op1;
+	processFlags1(E);
+}
+
+:ORP iopr16	is prefix=3 & op8=0x3B; iopr16
+{
+	local op1:2 = iopr16 & 0xFFF0;
+	S = S || op1[15,1];
+	MV = MV || op1[14,1];
+	H = H || op1[13,1];
+	EV = EV || op1[12,1];
+	N = N || op1[11,1];
+	Z = Z || op1[10,1];
+	V = V || op1[9,1];
+	C = C || op1[8,1];
+	IPF = IPF | op1[5,3];
+	SM = SM || op1[4,1];
+}
+
+:PSHA is prefix=3 & op8=0x08
+{
+	push1(A);
+}
+
+:PSHB is prefix=3 & op8=0x18
+{
+	push1(B);
+}
+
+# tables to support PUSHM ########################
+
+imm0S: imm0a is imm0a & imm0a=1 { push2(D);}
+imm0S: imm0a is imm0a & imm0a=0 {}
+
+# add comma to display if more registers will be pulled
+imm01: "," is imm0c=1 & imm1c=1 {}
+imm01: is imm0c=0 | imm1c=0 {}
+
+imm1S: imm1a is imm1a & imm1a=1 { push2(E);}
+imm1S: imm1a is imm1a & imm1a=0 {}
+
+imm12: "," is imm0_1!=0 & imm2c=1 {}
+imm12: is imm0_1=0 | imm2c=0 {}
+
+imm2S: imm2a is imm2a & imm2a=1 { push2(IX);}
+imm2S: imm2a is imm2a & imm2a=0 {}
+
+imm23: "," is imm0_2!=0 & imm3c=1 {}
+imm23:  is imm0_2=0 | imm3c=0 {}
+
+imm3S: imm3a is imm3a & imm3a=1 { push2(IY);}
+imm3S: imm3a is imm3a & imm3a=0 {}
+
+imm34: "," is imm0_3!=0 & imm4c=1 {}
+imm34:  is imm0_3=0 | imm4c=0 {}
+
+imm4S: imm4a is imm4a & imm4a=1 { push2(IZ);}
+imm4S: imm4a is imm4a & imm4a=0 {}
+
+imm45: "," is imm0_4!=0 & imm5c=1 {}
+imm45:  is imm0_4=0 | imm5c=0 {}
+
+imm5S: imm5a is imm5a & imm5a=1 { buildK();	push2(K);}
+imm5S: imm5a is imm5a & imm5a=0 {}
+
+imm56: "," is imm0_5!=0 & imm6c=1 {}
+imm56:  is imm0_5=0 | imm6c=0 {}
+
+imm6S: imm6a is imm6a & imm6a=1 { syncCCRtoFlags();	push2(CCR_PK);}
+imm6S: imm6a is imm6a & imm6a=0 {}
+
+
+:PSHM imm0S^imm01^imm1S^imm12^imm2S^imm23^imm3S^imm34^imm4S^imm45^imm5S^imm56^imm6S   is (prefix=0 & op8=0x34) ; imm8 & imm0S & imm01 & imm1S & imm12 & imm2S & imm23 & imm3S & imm34 & imm4S & imm45 & imm5S & imm56 & imm6S 
+{
+	build imm0S;
+	build imm01;
+	build imm1S;
+	build imm12;
+	build imm2S;
+	build imm23;
+	build imm3S;
+	build imm34;
+	build imm4S;
+	build imm45;
+	build imm5S;
+	build imm56;
+	build imm6S;
+}
+
+
+:PSHMAC is prefix=2 & op8=0xB8
+{
+	push2(HR);
+	push2(IR);
+	push2(AM_LSW);
+	push2(AM_MidW);
+	local op2:2 = zext(SignLatch) << 15;
+	local op1:2  = zext(AMFull[32,4]);
+	op1 = op1 | op2;
+	push2(op1);
+	push2(XYMSK);
+}
+
+:PULA is prefix=3 & op8=0x09
+{
+	pull1(A);
+}
+
+:PULB is prefix=3 & op8=0x19
+{
+	pull1(B);
+}
+
+# tables to support PULM ################
+
+# bit 0 pulls CCR
+imm0L: imm0c is imm0c & imm0c=1
+{
+	SPextended = SPextended + 2;
+	local pullValue:2 = * SPextended;
+	CCR_PK =  pullValue; # store popped CCR
+	syncFlagsToCCR();	
+}
+
+imm0L: imm0c is imm0c & imm0c=0 {}
+
+imm1L: imm1c is imm1c & imm1c=1 { pull2(K);	syncToK();}
+imm1L: imm1c is imm1c & imm1c=0 {}
+
+imm2L: imm2c is imm2c & imm2c=1 { pull2(IZ);}
+imm2L: imm2c is imm2c & imm2c=0 {}
+
+imm3L: imm3c is imm3c & imm3c=1 { pull2(IY);}
+imm3L: imm3c is imm3c & imm3c=0 {}
+
+imm4L: imm4c is imm4c & imm4c=1 { pull2(IX);}
+imm4L: imm4c is imm4c & imm4c=0 {}
+
+imm5L: imm5c is imm5c & imm5c=1 { pull2(E);}
+imm5L: imm5c is imm5c & imm5c=0 {}
+
+imm6L: imm6c is imm6c & imm6c=1 { pull2(D);}
+imm6L: imm6c is imm6c & imm6c=0 {}
+
+
+:PULM imm0L^imm01^imm1L^imm12^imm2L^imm23^imm3L^imm34^imm4L^imm45^imm5L^imm56^imm6L   is (prefix=0 & op8=0x35) ; imm8 & imm0L & imm01 & imm1L & imm12 & imm2L & imm23 & imm3L & imm34 & imm4L & imm45 & imm5L & imm56 & imm6L 
+{
+	build imm0L;
+	build imm01;
+	build imm1L;
+	build imm12;
+	build imm2L;
+	build imm23;
+	build imm3L;
+	build imm34;
+	build imm4L;
+	build imm45;
+	build imm5L;
+	build imm56;
+	build imm6L;
+}
+
+
+:PULMAC is prefix=2 & op8=0xB9
+{
+	pull2(XYMSK);
+	local op1:2;
+	pull2(op1);
+	SignLatch = op1[15,1];
+	AMFull[32,4] = op1[0,4];
+	checkOverflowAM();
+	pull2(AM_MidW);
+	pull2(AM_LSW);
+	pull2(IR);
+	pull2(HR);
+}
+
+:RMAC xo,yo	is (prefix=0 & op8=0xFB) ; xo ; yo
+{
+	D = 0; # D is used for storage during operation, so corrupted
+	
+	<rmacLoop>
+	local result:4 = sext(HR) * sext(IR);
+	result = result << 1;
+
+	AMFull = AMFull + sext(result);
+	computeMV();
+	checkOverflowAM();
+	computeEV();
+	
+	IX = (IX & ~zext(XMSK)) | ((IX + xo) & zext(XMSK));
+	IY = (IY & ~zext(YMSK)) | ((IY + yo) & zext(YMSK));
+
+	local addr:4 = IXE;
+	HR = *:2 addr;
+	addr = IYE;
+	IR = *:2 addr;
+	
+	E = E - 1;
+	if (E s>= 0) goto <rmacLoop>;
+}
+
+:ROL operandsMemByte1	is (op3_0=0b1100 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	tmpC:1 = C;
+	local op1:1 = operandsMemByte1;
+	C = op1[7,1];
+	local result:1 = op1 << 1;
+	result = result | tmpC;
+	operandsMemByte1 = result;
+	shiftFlags(result);
+}
+
+:ROLA	is prefix=3 & op8=0x0C 
+{
+	tmpC:1 = C;
+	C = A[7,1];
+	A = A << 1;
+	A = A | tmpC;
+	shiftFlags(A);
+}
+
+:ROLB	is prefix=3 & op8=0x1C 
+{
+	tmpC:1 = C;
+	C = B[7,1];
+	B = B << 1;
+	B = B | tmpC;
+	shiftFlags(B);
+}
+
+:ROLD	is prefix=2 & op8=0xFC 
+{
+	tmpC:2 = zext(C);
+	C = D[15,1];
+	D = D << 1;
+	D = D | tmpC;
+	shiftFlags(D);
+}
+
+:ROLE	is prefix=2 & op8=0x7C 
+{
+	tmpC:2 = zext(C);
+	C = E[15,1];
+	E = E << 1;
+	E = E | tmpC;
+	shiftFlags(E);
+}
+
+:ROLW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1100) ... & operandsMemWord1
+{
+	tmpC:2 = zext(C);
+	local op1:2 = operandsMemWord1;
+	C = op1[15,1];
+	local result:2 = op1 << 1;
+	result = result | tmpC;
+	operandsMemWord1 = result;
+	shiftFlags(result);
+}
+
+:ROR operandsMemByte1	is (op3_0=0b1110 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	tmpC:1 = C << 7;
+	local op1:1 = operandsMemByte1;
+	C = op1[0,1];
+	local result = op1 >> 1;
+	result = result | tmpC;
+	operandsMemByte1 = result;
+	shiftFlags(result);
+}
+
+:RORA	is prefix=3 & op8=0x0E 
+{
+	tmpC:1 = C << 7;
+	C = A[0,1];
+	A = A >> 1;
+	A = A | tmpC;
+	shiftFlags(A);
+}
+
+:RORB	is prefix=3 & op8=0x1E 
+{
+	tmpC:1 = C << 7;
+	C = B[0,1];
+	B = B >> 1;
+	B = B | tmpC;
+	shiftFlags(B);
+}
+
+:RORD	is prefix=2 & op8=0xFE 
+{
+	tmpC:2 = zext(C) << 15;
+	C = D[0,1];
+	D = D >> 1;
+	D = D | tmpC;
+	shiftFlags(D);
+}
+
+:RORE	is prefix=2 & op8=0x7E 
+{
+	tmpC:2 = zext(C) << 15;
+	C = E[0,1];
+	E = E >> 1;
+	E = E | tmpC;
+	shiftFlags(E);
+}
+
+:RORW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1110) ... & operandsMemWord1 
+{
+	tmpC:2 = zext(C) << 15;
+	local op1:2 = operandsMemWord1;
+	C = op1[0,1];
+	local result:2 = op1 >> 1;
+	result = result | tmpC;
+	operandsMemWord1 = result;
+	shiftFlags(result);
+}
+
+
+:RTI is prefix=2 & op8=0x77
+{
+	pull2(CCR_PK);
+	syncFlagsToCCR();
+	PCextended = 0;
+	PCextended[16,4] = CCR_PK[0,4];
+	pull2(PC);
+	tmp_PCfull:4 = PCextended - 6;
+	
+	return [tmp_PCfull];
+}
+
+:RTS is prefix=2 & op8=0xF7
+{
+	pull2(CCR_PK);
+	syncFlagsToCCR();
+	
+	PCextended = 0;
+	PCextended[16,4] = CCR_PK[0,4];
+	pull2(PC);
+	tmp_PCfull:4 = PCextended-2;
+	
+	return [tmp_PCfull];
+}
+
+:SBA is prefix=3 & op8=0x0A
+{ 
+	local result:1 = A - B;
+	subtraction_flags8(A, B, result);
+	A = result;
+}
+
+:SBCA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0010) ... & operandsMemByte2 
+{
+	local op1 = operandsMemByte2;
+
+	local result:1;
+	subtractionWithCarry8(A, op1, result);
+	A = result;
+}
+
+:SBCB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0010) ... & operandsMemByte2 
+{
+	local op1 = operandsMemByte2;
+
+	local result:1;
+	subtractionWithCarry8(B, op1, result);
+	B = result;
+}
+
+:SBCD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0010) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	local result:2;
+	subtractionWithCarry16(D, op1, result);
+	D = result;
+}
+
+:SBCE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0010) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	local result:2;
+	subtractionWithCarry16(E, op1, result);
+	E = result;
+}
+
+:SDE is prefix=2 & op8=0x79
+{
+	local result:2 = E - D;
+	subtraction_flags16(E, D, result);
+	E = result;
+}
+
+:STAA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b1010) ... & operandsMemByte2 
+{
+	operandsMemByte2 = A;
+
+	processFlags1(A);
+}
+
+:STAB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b1010) ... & operandsMemByte2 
+{
+	operandsMemByte2 = B;
+
+	processFlags1(B);
+}
+
+
+:STD operandsMemWord6	is ((((prefix=0 | prefix=2) & op7_6=0b10) | (prefix=3 & op7_7=0b1)) & op3_0=0b1010) ... & operandsMemWord6  # no imm16
+{
+	operandsMemWord6 = D;
+
+	processFlags1(D);
+}
+
+:STE operandsMemWord2	is (prefix=3 & op3_0=0b1010  & op7_6 = 0b01) ... & operandsMemWord2 # no imm16, explicit prefix=3 to avoid conflict with STAA
+{
+	operandsMemWord2 = E;
+
+	processFlags1(E);
+}
+
+:STED imm16	is prefix=2 & op8=0x73; imm16 
+{
+	local addrOffset:2 = imm16;
+	local addr:4 = zext(addrOffset) + EK;
+	local op1:4 = (zext(E) << 16) | zext(D) ;
+	*:4 addr = op1;
+}
+ 
+:STS operandsMemWord4	is (op3_0=0b1111 & op7_6=0b10) ... & operandsMemWord4
+{
+	operandsMemWord4 = SP;
+
+	processFlags1(SP);
+}
+ 
+:STX operandsMemWord4	is (op3_0=0b1100 & op7_6=0b10) ... & operandsMemWord4
+{
+	operandsMemWord4 = IX;
+
+	processFlags1(IX);
+}
+ 
+:STY operandsMemWord4	is (op3_0=0b1101 & op7_6=0b10) ... & operandsMemWord4
+{
+	operandsMemWord4 = IY;
+
+	processFlags1(IY);
+}
+ 
+:STZ operandsMemWord4	is (op3_0=0b1110 & op7_6=0b10) ... & operandsMemWord4
+{
+	operandsMemWord4 = IZ;
+
+	processFlags1(IZ);
+}
+
+:SUBA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0000) ... & operandsMemByte2  
+{
+	local op1 = operandsMemByte2;
+
+	local result:1 = A - op1;
+	subtraction_flags8(A, op1, result);
+	A = result;
+}
+
+:SUBB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0000) ... & operandsMemByte2  
+{
+	local op1 = operandsMemByte2;
+
+	local result:1 = B - op1;
+	subtraction_flags8(B, op1, result);
+	B = result;
+}
+
+:SUBD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0000) ... & operandsMemWord6
+{
+	local op1:2 = operandsMemWord6;
+
+	result:2 = D - op1;
+	subtraction_flags16(D, op1, result);
+	D = result;
+}
+
+:SUBE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0000) ... & operandsMemWord2
+{
+	local op1:2 = operandsMemWord2;
+
+	result:2 = E - op1;
+	subtraction_flags16(E, op1, result);
+	E = result;
+}
+
+:SWI is prefix=3 & op8=0x20
+{
+	local tmp_PCfull:4 = inst_next+6;
+	local tmp_PC:2 = tmp_PCfull:2;
+	push2( tmp_PC );
+	syncCCRtoFlags();
+	local tmp = CCR_PK;
+	push2( tmp );
+	
+	local addr:4 = 0x00000C;
+	
+	call [addr];
+}
+
+:SXT is prefix=2 & op8=0xF8
+{
+	local op1:2 = sext(B);
+	A = op1(1);
+	Z = (A == 0);
+	N = ( A s< 0);
+}
+
+:TAB is prefix=3 & op8=0x17
+{
+	B = A;
+	processFlags1(B);
+}
+
+:TAP is prefix=3 & op8=0xFD
+{
+	CCR_PK[8,8] = A;
+	syncFlagsToCCR();
+}
+
+:TBA is prefix=3 & op8=0x07
+{
+	A = B;
+	processFlags1(A);
+}
+
+:TBEK is prefix=2 & op8=0xFA
+{
+	EK = zext(B[0,4]) << 16;
+}
+
+:TBSK is prefix=3 & op8=0x9F
+{
+	SP_EXT = zext(B[0,4]);
+}
+
+:TBXK is prefix=3 & op8=0x9C
+{
+	XKE = zext(B[0,4]);
+}
+
+:TBYK is prefix=3 & op8=0x9D
+{
+	YKE = zext(B[0,4]);
+}
+
+:TBZK is prefix=3 & op8=0x9E
+{
+	ZKE = zext(B[0,4]);
+}
+
+:TDE is prefix=2 & op8=0x7B
+{
+	E = D;
+	processFlags1(E);
+}
+
+:TDMSK is prefix=3 & op8=0x2F
+{
+	XYMSK = D;
+}
+
+:TDP is prefix=3 & op8=0x2D
+{
+	CCR_PK[4,12] = D[4,12];
+	syncFlagsToCCR();
+}
+
+:TED is prefix=2 & op8=0xFB
+{
+	D = E;
+	processFlags1(D);
+}
+
+:TEDM is prefix=2 & op8=0xB1
+{
+	AM_LSW = D;
+	AM_MidW = E;
+	AM_Top3 = sext(AM_MidW);
+	MV = 0;
+	EV = 0;
+}
+
+:TEKB is prefix=2 & op8=0xBB
+{
+	local temp:2 = EK(2);
+	B =  temp:1;
+}
+
+:TEM is prefix=2 & op8=0xB2
+{
+	AM_LSW = 0;
+	AM_MidW = E;
+	AM_Top3 = sext(AM_MidW);
+	MV = 0;
+	EV = 0;
+}
+
+:TMER is prefix=2 & op8=0xB4
+{
+	local AMroundup:1 = (AM_LSW > 0x8000); #false=zero if no roundup needed
+	AMroundup = (AMroundup || ((AM_LSW == 0x8000) && (AMFull[16,1] == 1)));
+	local AMsign:1 = AMFull[31,1];
+	local AMpositive:1 = (AMsign == 0);
+	local AMnegative:1 = (AMsign == 1);
+
+# roundAdjust will be 0 if no rounding needed, +1 if roundup positive AM and -1 if roundup negative
+	local roundAdjust = (AMroundup * AMpositive) - (AMroundup * AMnegative);
+	AM_Top3 = AM_Top3 + sext(roundAdjust);
+	
+	computeMV();
+	checkOverflowAM();
+	computeEV();
+	
+	local AM35Set:2 = zext(AMFull[35,1] == 1);
+	local AM35Clear:2 = zext(AMFull[35,1] == 0);
+	local EVSet:2 = zext(EV == 1);
+	local EVClear:2 = zext(EV == 0);
+	local MVSet:2 = zext(MV == 1);
+	local MVClear:2 = zext(MV == 0);
+	local SLSet:2 = zext(SignLatch == 1);
+	local SLClear:2 = zext(SignLatch == 0);
+	local SaturatedSet:2 = zext(SM == 1);
+	local SaturatedClear:2 = zext(SM == 0);
+	
+	E = (AM_MidW * SaturatedClear) + SaturatedSet * (
+		(AM35Clear * EVSet * MVClear * 0x7FFF) +
+		(AM35Set * EVSet * MVClear * 0x8000) +
+		(EVSet * MVSet * SLSet * 0x7FFF) +
+		(EVSet * MVSet * SLClear * 0x8000)	)
+	;
+	
+	N = (E s< 0);
+	Z = (E == 0);
+}
+
+
+:TMET is prefix=2 & op8=0xB5
+{
+	local AM35Set:2 = zext(AMFull[35,1] == 1);
+	local AM35Clear:2 = zext(AMFull[35,1] == 0);
+	local EVSet:2 = zext(EV == 1);
+	local EVClear:2 = zext(EV == 0);
+	local MVSet:2 = zext(MV == 1);
+	local MVClear:2 = zext(MV == 0);
+	local SLSet:2 = zext(SignLatch == 1);
+	local SLClear:2 = zext(SignLatch == 0);
+	local SaturatedSet:2 = zext(SM == 1);
+	local SaturatedClear:2 = zext(SM == 0);
+	
+	E = (AM_MidW * SaturatedClear) + SaturatedSet * (
+		(AM35Clear * EVSet * MVClear * 0x7FFF) +
+		(AM35Set * EVSet * MVClear * 0x8000) +
+		(EVSet * MVSet * SLSet * 0x7FFF) +
+		(EVSet * MVSet * SLClear * 0x8000)	)
+	;
+	
+	N = (E s< 0);
+	Z = (E == 0);
+}
+
+:TMXED  is prefix=2 & op8=0xB3
+{
+	IX = sext(AM_MSB);
+	E = AM_MidW;
+	D = AM_LSW;
+}
+
+:TPA  is prefix=3 & op8=0xFC
+{
+	syncCCRtoFlags();
+	A = CCR_PK[8,8];
+}
+
+:TPD is prefix=3 & op8=0x2C
+{
+	syncCCRtoFlags();
+	D = CCR_PK;
+}
+
+:TSKB is prefix=3 & op8=0xAF
+{
+	B = 0;
+	B[0,4] = SP_EXT[0,4];
+}
+
+:TST operandsMemByte1	is (op3_0=0b0110 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+{
+	local op1:1 = operandsMemByte1;
+
+	testFlags(op1);
+}
+
+:TSTA is prefix=3 & op8=0x06
+{
+	testFlags(A);
+}
+
+
+:TSTB is prefix=3 & op8=0x16
+{
+	testFlags(B);
+}
+
+:TSTD is prefix=2 & op8=0xF6
+{
+	testFlags(D);
+}
+
+:TSTE is prefix=2 & op8=0x76
+{
+	testFlags(E);
+}
+
+:TSTW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0110) ... & operandsMemWord1 
+{
+	local op1:2 = operandsMemWord1;
+
+	testFlags(op1);
+}
+
+:TSX is prefix=2 & op8=0x4F
+{
+	local stackValue:4 = SPextended;
+	stackValue = stackValue + 2;
+	IXE = stackValue;
+}
+
+:TSY is prefix=2 & op8=0x5F
+{
+	local stackValue:4 = SPextended;
+	stackValue = stackValue + 2;
+	IYE = stackValue;
+}
+
+:TSZ is prefix=2 & op8=0x6F
+{
+	local stackValue:4 = SPextended;
+	stackValue = stackValue + 2;
+	IZE = stackValue;
+}
+
+:TXKB is prefix=3 & op8=0xAC
+{
+	B = XKE:1;
+}
+
+:TXS is prefix=3 & op8=0x4E
+{
+	local XValue:4 = IXE;
+	XValue = XValue - 2;
+	SPextended = XValue;
+}
+
+:TXY is prefix=2 & op8=0x5C
+{
+	IYE = IXE;
+}
+
+:TXZ is prefix=2 & op8=0x6C
+{
+	IZE = IXE;
+}
+
+:TYKB is prefix=3 & op8=0xAD
+{
+	B = YKE:1;
+}
+
+:TYS is prefix=3 & op8=0x5E
+{
+	local YValue:4 = IYE;
+	YValue = YValue - 2;
+	SPextended = YValue;
+}
+
+:TYX is prefix=2 & op8=0x4D
+{
+	IXE = IYE;
+}
+
+:TYZ is prefix=2 & op8=0x6D
+{
+	IZE = IYE;
+}
+
+:TZKB is prefix=3 & op8=0xAE
+{
+	B = ZKE:1;
+}
+
+:TZS is prefix=3 & op8=0x6E
+{
+	local ZValue:4 = IZE;
+	ZValue = ZValue - 2;
+	SPextended = ZValue;
+}
+
+:TZX is prefix=2 & op8=0x4E
+{
+	IXE = IZE;
+}
+
+:TZY is prefix=2 & op8=0x5E
+{
+	IYE = IZE;
+}
+
+:WAI is prefix=2 & op8=0xF3
+{
+	WaitForInterrupt();
+}
+
+:XGAB is prefix=3 & op8=0x1A
+{
+	local tmp:1 = A;
+	A = B;
+	B = tmp;
+}
+
+:XGDE is prefix=2 & op8=0x7A
+{
+	local tmp:2 = D;
+	D = E;
+	E = tmp;
+}
+
+:XGDX is prefix=3 & op8=0xCC
+{
+	local tmp:2 = D;
+	D = IX;
+	IX = tmp;
+}
+
+:XGDY is prefix=3 & op8=0xDC
+{
+	local tmp:2 = D;
+	D = IY;
+	IY = tmp;
+}
+
+:XGDZ is prefix=3 & op8=0xEC
+{
+	local tmp:2 = D;
+	D = IZ;
+	IZ = tmp;
+}
+
+:XGEX is prefix=3 & op8=0x4C
+{
+	local tmp:2 = E;
+	E = IX;
+	IX = tmp;
+}
+
+:XGEY is prefix=3 & op8=0x5C
+{
+	local tmp:2 = E;
+	E = IY;
+	IY = tmp;
+}
+
+:XGEZ is prefix=3 & op8=0x6C
+{
+	local tmp:2 = E;
+	E = IZ;
+	IZ = tmp;
+}
+

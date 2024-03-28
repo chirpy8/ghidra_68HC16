@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- See Relax specification: Ghidra/Framework/SoftwareModeling/data/languages/language_definitions.rxg -->
+
+<language_definitions>
+   <language processor="HC16"
+            endian="big"
+            size="32"
+            variant="default"
+            version="1.0"
+            slafile="HC16.sla"
+            processorspec="HC16.pspec"
+            manualindexfile="../manuals/HC16.idx"
+            id="HC16:BE:32:default">
+    <description>HC16 Microcontroller Family</description>
+    <compiler name="default" spec="HC16.cspec" id="default"/>
+  </language> 
+</language_definitions>

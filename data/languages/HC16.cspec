@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- See Relax specification: Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg -->
+
+<compiler_spec>
+  <global>
+    <range space="code"/>
+  </global>
+  <stackpointer register="SPextended" space="code" growth="negative"/>
+
+  <returnaddress>
+    <varnode space="stack" offset="0" size="4"/>
+  </returnaddress>
+
+    <default_proto>
+     <prototype name="__cdecl" extrapop="4" stackshift="4" strategy="register" >
+      <input>
+         <pentry minsize="1" maxsize="500" align="2">
+    	   <addr offset="4" space="stack"/>
+        </pentry>
+      </input>
+      <output>
+        <pentry minsize="1" maxsize="2">
+          <register name="D"/>
+        </pentry>
+      </output>
+       <unaffected>
+        <register name="SPextended"/>
+        <register name="IZE"/>
+      </unaffected>
+    </prototype>
+  </default_proto>
+ 
+    
+        <prototype name="__stdcall" extrapop="4" stackshift="4" strategy="register">
+      <input killedbycall = "true">
+        <pentry minsize="1" maxsize="2">
+          <register name="D"/>
+        </pentry>
+        <pentry minsize="2" maxsize="2">
+          <register name="E"/>
+        </pentry>
+        <pentry minsize="2" maxsize="2">
+          <register name="IX"/>
+        </pentry>
+        <pentry minsize="2" maxsize="2">
+          <register name="IY"/>
+        </pentry>
+      </input>
+      <output>
+        <pentry minsize="1" maxsize="2">
+          <register name="D"/>
+        </pentry>
+      </output>
+      <unaffected>
+        <register name="SPextended"/>
+      </unaffected>  
+    </prototype>
+    
+    
+
+</compiler_spec>
+
+

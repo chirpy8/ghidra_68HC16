@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- See Relax specification: Ghidra/Framework/SoftwareModeling/data/languages/processor_spec.rxg -->
+
+<processor_spec>
+  <programcounter register="PCextended"/>
+  
+  <default_symbols>
+    <symbol name="VECTOR_Reset_Initial_ZK_SK_PK" address="code:0000"/>
+    <symbol name="VECTOR_Reset_Initial_PC" address="code:0002"/>
+    <symbol name="VECTOR_Reset_Initial_SP" address="code:0004"/>
+    <symbol name="VECTOR_Reset_Initial_IZ" address="code:0006"/>
+   </default_symbols>
+</processor_spec>
