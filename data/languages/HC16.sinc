@@ -18,7 +18,7 @@ define register offset=0x02 size=2 [E];
 
 define register offset=0x10 size=4 [IXE IYE IZE]; # pseudo 20 (32 actual) bit registers for index registers
 define register offset=0x10 size=2 [_ IX _ IY _ IZ];
-define register offset=0x10 size=2 [XKE _ YKE _ ZKE]; # pseudo registers for extension registers
+define register offset=0x10 size=2 [XKE _ YKE _ ZKE]; # pseudo 20 bit registers for extension registers
 
 define register offset=0x20 size=4 [SPextended];   # Stack grows downward/negative address, SK:SP points to next available stack address, needs to address 20 bits with extension
 define register offset=0x22 size=2 [SP];   # 16 bit register
@@ -109,8 +109,8 @@ define token data16 (16)
 	simm16 = (0,15) signed
 ;
 
-attach variables [op5_4] [IX IY IZ _ ]; # used to select register for indexed addressing
-attach variables [op5_4a] [IXE IYE IZE _ ]; # used to select register for indexed addressing
+#attach variables [op5_4] [IX IY IZ _ ]; # used to select register for indexed addressing
+attach variables [op5_4a] [IXE IYE IZE _ ]; # used to select extended register for indexed addressing
 
 attach names [op5_4b] ["X" "Y" "Z" "Unknown"]; # used to display the index register being used
 
@@ -315,10 +315,9 @@ macro testFlags(operand1)
 
 
 # truncate 32 bit register varnode to 20 bits
-# unlikely to be needed in normal operation, so commented out
 macro checkIndexOverflow(operand)
 {
-#	operand = operand & 0x0FFFFF;
+	operand = operand & 0x0FFFFF;
 }
 
 macro syncCCRtoFlags()
@@ -390,26 +389,43 @@ macro  computeMV()
 }
 
 ################################################################
-# Addressing modes
+# Addressing table primitives
 ################################################################
 
+indexReg: op5_4b is (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b
+{ local addr:4 = op5_4a:4 ; export addr;}
+
+offset_u8: imm8 is imm8
+{ local addr:4 = zext(imm8:1); export addr;}
+
+offset_s16: simm16 is simm16
+{ local addr:4 = sext(simm16:2); export addr;}
+
+extendedAddr: imm16	is imm16
+{ local addr:4 = zext(imm16:2) + EK; export addr;}
+
+accumulator_E: "E",indexReg is prefix=2 & indexReg
+{ local addr:4 = indexReg + sext(E); export addr;}
+
+###################################################################
+# macro strings
+###################################################################
+
+@define NotPrefix3 "(prefix=0 | prefix=1 | prefix=2)"
+
+@define NotPrefix0AndOp54 "((prefix=0) & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))"
 
 ###################################################################
 # addressing mode pattern 1 for byte based instructions
 # applies to ASL, ASR, CLR, COM, DEC, INC, LSR, NEG, ROL, ROR, TST
 # covers addressing modes indexed8, indexed16, and extended
-# instruction matches pattern on op7_6 and op3_0
+# instruction matches pattern on op7_6 and op3_0 and (prefix=1 | NotPrefix0AndOp54)
 # returns a byte value
 ##################################################################
 
-operandsMemByte1: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8
-{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:1 addr;}
-
-operandsMemByte1: simm16,op5_4b	is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:1 addr;}
-
-operandsMemByte1: imm16	is prefix=1 & op5_4=0b11; imm16
-{ local addr:4 = zext(imm16:2) + EK; export *:1 addr;}
+memByte1: offset_u8,indexReg is prefix=0 & indexReg ; offset_u8 { local addr:4 = indexReg + offset_u8; export *:1 addr; }
+memByte1: offset_s16,indexReg is prefix=1 & indexReg ; offset_s16 { local addr:4 = indexReg + offset_s16; export *:1 addr; }
+memByte1: extendedAddr is prefix=1 & op5_4=0b11 ; extendedAddr { local addr:4 = extendedAddr; export *:1 addr; }
 
 ###################################################################
 # addressing mode pattern 2 for byte based instructions
@@ -418,53 +434,38 @@ operandsMemByte1: imm16	is prefix=1 & op5_4=0b11; imm16
 # SBCA, SBCB, STAA, STAB, SUBA, SUBB
 # covers addressing modes defined in byte mode pattern 4,
 # plus immediate 8 and accumulator E indexed
-# instruction matches pattern on op7_6 and op3_0
+# instruction matches pattern on op7_6 and op3_0 and NotPrefix3
 # returns a byte value
 ##################################################################
 
-operandsMemByte2: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8
-{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:1 addr;}
-
-operandsMemByte2: simm16,op5_4b	is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:1 addr;}
-
-operandsMemByte2: imm16	is prefix=1 & op5_4=0b11; imm16 { local addr:4 = zext(imm16:2) + EK; export *:1 addr;}
-
-operandsMemByte2: "#"^imm8 is prefix=0 & op5_4=0b11; imm8 { export *[const]:1 imm8;}
-
-operandsMemByte2: "E",op5_4b is prefix=2 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b
-{ local addr:4 = op5_4a:4 + sext(E); export *:1 addr;}
+memByte2: memByte1 is memByte1 { export memByte1; }
+memByte2: "#"^imm8 is prefix=0 & op5_4=0b11; imm8 { export *[const]:1 imm8;}
+memByte2: accumulator_E is accumulator_E { local addr:4 = accumulator_E; export *:1 addr; }
 
 ###################################################################
 # addressing mode pattern 3 for byte based instructions
 # mask byte is inserted
 # between the opcode and the addressing operands
 # applies to BCLR, BSET
-# instruction matches pattern on op7_6 and op3_0
+# instruction matches pattern on op7_6 and op3_0 and (prefix=0 | prefix=1)
 # returns a byte value
-##################################################################
+################################################################## 
 
-operandsMemByte3: imm8,op5_4b is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; mask8 ; imm8 
-{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:1 addr; } 
-
-operandsMemByte3: simm16,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; mask8 ; simm16 
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:1 addr; } 
-
-operandsMemByte3: imm16	is prefix=0 & op5_4=0b11; mask8 ; imm16  { local addr:4 = zext(imm16:2) + EK; export *:1 addr; } 
+memByte3: offset_u8,indexReg is prefix=1 & indexReg ; mask8 ; offset_u8 { local addr:4 = indexReg + offset_u8; export *:1 addr; }
+memByte3: offset_s16,indexReg is prefix=0 & indexReg ; mask8 ; offset_s16 { local addr:4 = indexReg + offset_s16; export *:1 addr; }
+memByte3: extendedAddr is prefix=0 & op5_4=0b11 ; mask8 ; extendedAddr { local addr:4 = extendedAddr; export *:1 addr; }
 
 ############################################################
 # addressing mode pattern 1 for word based instructions
 # applies to ASLW, ASRW, BCLRW, BSETW, CLRW, COMW, DECW
 # INCW, LSRW, NEGW, ROLW, RORW, TSTW
 # covers addressing modes indexed16 and extended
-# instruction matches pattern on op7_6=0b00 and op3_0
+# instruction matches pattern on op7_6=0b00 and op3_0 and prefix=2
 # returns a word value
 ############################################################
 
-operandsMemWord1: simm16,op5_4b is prefix=2 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
-
-operandsMemWord1: imm16	is prefix=2 & op5_4=0b11; imm16  { local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
+memWord1: offset_s16,indexReg is prefix=2 & indexReg ; offset_s16 { local addr:4 = indexReg + offset_s16; export *:2 addr; }
+memWord1: extendedAddr is prefix=2 & op5_4=0b11 ; extendedAddr { local addr:4 = extendedAddr; export *:2 addr; }
 
 ############################################################
 # addressing mode pattern 2 for word based instructions
@@ -472,83 +473,58 @@ operandsMemWord1: imm16	is prefix=2 & op5_4=0b11; imm16  { local addr:4 = zext(i
 # also used for STE with immediate16 filtered out by op7_6=0b01
 # also used for ADDE with explicit immediate8 support - note sign extended
 # covers addressing modes immediate16, indexed16 and extended
-# instruction matches pattern on op7_7=0 & op3_0
+# instruction matches pattern on op7_7=0 & op3_0 and prefix=3 (with ADDE explicit exception)
 # returns a word value
 ############################################################
 
-operandsMemWord2: "#"^imm16 is prefix=3 & op7_6=0b00 & op5_4=0b11; imm16  { export *[const]:2 imm16;}
+memWord2: "#"^imm16 is prefix=3 & op6_6=0b0 & op5_4=0b11; imm16  { export *[const]:2 imm16;}
+memWord2: offset_s16,indexReg is prefix=3 & op6_6=0b1 & indexReg ; offset_s16 { local addr:4 = indexReg + offset_s16; export *:2 addr; }
+memWord2: extendedAddr is prefix=3 & op6_6=0b1 & op5_4=0b11 ; extendedAddr { local addr:4 = extendedAddr; export *:2 addr; }
+memWord2: "#"^imm8 is  prefix=0 & op8=0x7C; imm8  {local addr:2 = sext(imm8:1); export *[const]:2 addr;}
 
-operandsMemWord2: simm16,op5_4b is prefix=3 & op7_6=0b01 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
+############################################################
+# addressing mode pattern 3 for word based instructions
+# applies to STS, STX, STY, STZ
+# instruction matches pattern on op7_6 and op3_0 and (prefix=0 | prefix=1)
+# returns a word value
+############################################################
 
-operandsMemWord2: imm16	is prefix=3 & op7_6=0b01 & op5_4=0b11; imm16
-{ local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
-
-operandsMemWord2: "#"^imm8 is  prefix=0 & op8=0x7C; imm8  {local addr:2 = sext(imm8:1); export *[const]:2 addr;}
+memWord3: offset_s16,indexReg is prefix=1 & indexReg ; offset_s16 { local addr:4 = indexReg + offset_s16; export *:2 addr; }
+memWord3: extendedAddr is prefix=1 & op5_4=0b11 ; extendedAddr { local addr:4 = extendedAddr; export *:2 addr; }
+memWord3: offset_u8,indexReg is prefix=0 & indexReg ; offset_u8 { local addr:4 = indexReg + offset_u8; export *:2 addr; }
 
 ############################################################
 # addressing mode pattern 4 for word based instructions
-# applies to STS, STX, STY, STZ
-# instruction matches pattern on op7_6 and op3_0
-# returns a word value
-############################################################
-
-operandsMemWord4: simm16,op5_4b is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
-
-operandsMemWord4: imm16 is prefix=1 & op5_4=0b11; imm16
-{ local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
-
-operandsMemWord4: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8 
-{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:2 addr; } 
-
-############################################################
-# addressing mode pattern 5 for word based instructions
 # applies to CPS, CPX, CPY, CPZ, LDS, LDX, LDY, LDZ
 # instruction matches pattern on
 # op3_0 and op7_6 and prefix=(0 or 1)
 # or
-# op3_0 and op7_6 and prefix=3
+# op3_0 and op7_6 and prefix=3 (only different on LDS/LDX/LDY/LDZ)
 # due to new pattern introduced by immediate16
-# extends word 4 and adds immediate 16
+# extends word 3 and adds immediate 16
 # returns a word value
 ############################################################
 
-operandsMemWord5: simm16,op5_4b is prefix=1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
-
-operandsMemWord5: imm16 is prefix=1 & op5_4=0b11; imm16 { local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
-
-operandsMemWord5: imm8,op5_4b is prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8 
-{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:2 addr; } 
-
-operandsMemWord5: "#"^imm16	is prefix=3 & op5_4=0b11; imm16 { export *[const]:2 imm16;}
+memWord4: memWord3 is memWord3 { export memWord3; }
+memWord4: "#"^imm16	is prefix=3 & op5_4=0b11; imm16 { export *[const]:2 imm16;}
 
 ############################################################
-# addressing mode pattern 6 for word based instructions
+# addressing mode pattern 5 for word based instructions
 # which applies to
 # ADCD, ANDD, CPD, EORD, LDD, ORD, SBCD, SUBD
 # STD (does not support immediate16 - would decode but 0x37BA instruction does not exist)
-# instruction matches pattern on op7 and op3_0
+# instruction matches pattern on op7 and op3_0 and (prefix=0 | prefix=2 | prefix=3)
 # covers addressing modes indexed8, indexed16, extended, accumulator E, immediate16
 # ADDD instruction adds immediate 8 with direct match to op8 pattern, note imm8 is sign extended
 # returns a word value
 ############################################################
 
-operandsMemWord6: imm8,op5_4b is prefix=0 & op6_6=0b0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; imm8
-{ local addr:4 = op5_4a:4 + zext(imm8:1); export *:2 addr;}
-
-operandsMemWord6: simm16,op5_4b	is prefix=3 & op6_6=0b1 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b; simm16
-{ local addr:4 = op5_4a:4 + sext(simm16:2); export *:2 addr;}
-
-operandsMemWord6: imm16	is prefix=3 & op6_6=0b1 & op5_4=0b11; imm16 { local addr:4 = zext(imm16:2) + EK; export *:2 addr;}
-
-operandsMemWord6: "E",op5_4b is prefix=2 & op6_6=0b0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b
-{ local addr:4 = op5_4a:4 + sext(E); export *:2 addr;}
-
-operandsMemWord6: "#"^imm16 is prefix=3 & op6_6=0b0 & op5_4=0b11; imm16 { export *[const]:2 imm16;}
-
-operandsMemWord6: "#"^imm8 is prefix=0 & op8=0xFC; imm8 {local addr:2 = sext(imm8:1); export *[const]:2 addr;}
+memWord5: offset_s16,indexReg is prefix=3 & op6_6=0b1 & indexReg ; offset_s16 { local addr:4 = indexReg + offset_s16; export *:2 addr; }
+memWord5: extendedAddr is prefix=3 & op6_6=0b1 & op5_4=0b11 ; extendedAddr { local addr:4 = extendedAddr; export *:2 addr; }
+memWord5: offset_u8,indexReg is prefix=0 & op6_6=0b0 & indexReg ; offset_u8 { local addr:4 = indexReg + offset_u8; export *:2 addr; }
+memWord5: accumulator_E is op6_6=0b0 & accumulator_E { local addr:4 = accumulator_E; export *:2 addr; }
+memWord5: "#"^imm16	is prefix=3 & op6_6=0b0 & op5_4=0b11; imm16 { export *[const]:2 imm16;}
+memWord5: "#"^imm8 is prefix=0 & op8=0xFC; imm8 {local addr:2 = sext(imm8:1); export *[const]:2 addr;}
 
 ############################################################
 # addressing mode pattern 8,9 for word and byte based instructions
@@ -673,8 +649,14 @@ operandsMemByteAddr9: imm16 is prefix=3 & op8 ; imm16a ; imm16
 
 # note index extension register is not used
 # code location from index and 20bit offset
+#operand20: addr,op5_4b is (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b); imm8; simm16
+#[addr = (((op5_4a & 0xffff) << 4) + ((((imm8 & 0x0F) << 16) + simm16) << 4)) >> 4;]
+#{
+#	export *:1 addr;
+#}
+
 operand20: addr,op5_4b is (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b); imm8; simm16
-[addr = (((op5_4a & 0xffff) << 4) + ((((imm8 & 0x0F) << 16) + simm16) << 4)) >> 4;]
+[addr = (((imm8 & 0x0f) << 16) + (simm16 & 0xffff) + op5_4a) & 0x0fffff;]
 {
 	export *:1 addr;
 }
@@ -795,9 +777,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 }		
 
 
-:ADCA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0011) ... & operandsMemByte2 
+:ADCA memByte2	is (op7_6=0b01 & op3_0=0b0011 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1 = operandsMemByte2;
+	local op1 = memByte2;
 
 	local result:1;
 	additionWithCarry8(A, op1, result);
@@ -806,9 +788,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 }
 
 
-:ADCB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0011) ... & operandsMemByte2  
+:ADCB memByte2	is (op7_6=0b11 & op3_0=0b0011 & $(NotPrefix3)) ... & memByte2  
 {
-	local op1 = operandsMemByte2;
+	local op1 = memByte2;
 
 	local result:1;
 	additionWithCarry8(B, op1, result);
@@ -816,9 +798,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	B = result;
 }
 
-:ADCD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0011) ... & operandsMemWord6
+:ADCD memWord5	is (op7_7 = 0b1 & op3_0=0b0011 & (prefix=0 | prefix=2 | prefix=3)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	local result:2;
 	additionWithCarry16(D, op1, result);
@@ -826,9 +808,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	D = result;	
 }
 
-:ADCE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0011) ... & operandsMemWord2
+:ADCE memWord2	is (op7_7 = 0b0 & op3_0=0b0011 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	local result:2;
 	additionWithCarry16(E, op1, result);
@@ -836,9 +818,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	E = result;
 }
 
-:ADDA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0001) ... & operandsMemByte2 
+:ADDA memByte2	is (op7_6=0b01 & op3_0=0b0001 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	local result:1 = A + op1;
 	addition_flags8(A, op1, result);
@@ -846,9 +828,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	A = result;
 }
 
-:ADDB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0001) ... & operandsMemByte2 
+:ADDB memByte2	is (op7_6=0b11 & op3_0=0b0001 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	local result:1 = B + op1;
 	addition_flags8(B, op1, result);
@@ -856,9 +838,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	B = result;
 }
 
-:ADDD operandsMemWord6	is ((op7_7=0b1 & op3_0=0b0001) | (prefix=0 & op8=0xFC)) ... & operandsMemWord6
+:ADDD memWord5	is ((op7_7=0b1 & op3_0=0b0001 & (prefix=0 | prefix=2 | prefix=3)) | (prefix=0 & op8=0xFC)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	local result:2 = D + op1;
 	addition_flags16(D, op1, result);
@@ -866,9 +848,9 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	D = result;
 }
 
-:ADDE operandsMemWord2	is ((prefix=3 & op7_7 = 0b0 & op3_0=0b0001) | (prefix=0 & op8=0x7C)) ... & operandsMemWord2 # includes immediate 8
+:ADDE memWord2	is ((op7_7 = 0b0 & op3_0=0b0001  & prefix=3) | (prefix=0 & op8=0x7C)) ... & memWord2 # includes immediate 8
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	local result:2 = E + op1;
 	addition_flags16(E, op1, result);
@@ -923,55 +905,55 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 :AIS immediate20	is ((prefix=0 | prefix=3) & op8=0x3F) ... & immediate20
 {
 	SPextended = SPextended + immediate20;
-#	checkIndexOverflow(SPextended);
+	checkIndexOverflow(SPextended);
 }
 
 :AIX immediate20	is ((prefix=0 | prefix=3) & op8=0x3C) ... & immediate20
 {
 	IXE = IXE + immediate20;
-#	checkIndexOverflow(IXE);
+	checkIndexOverflow(IXE);
 }
 
 :AIY immediate20	is ((prefix=0 | prefix=3) & op8=0x3D) ... & immediate20
 {
 	IYE = IYE + immediate20;
-#	checkIndexOverflow(IYE);
+	checkIndexOverflow(IYE);
 }
 
 :AIZ immediate20	is ((prefix=0 | prefix=3) & op8=0x3E) ... & immediate20
 {
 	IZE = IZE + immediate20;	
-#	checkIndexOverflow(IZE);
+	checkIndexOverflow(IZE);
 }
 
-:ANDA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0110) ... & operandsMemByte2 
+:ANDA memByte2	is (op7_6=0b01 & op3_0=0b0110 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	A = A & op1;
 	processFlags1(A);
 }
 
 
-:ANDB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0110) ... & operandsMemByte2 
+:ANDB memByte2	is (op7_6=0b11 & op3_0=0b0110 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	B = B & op1;
 	processFlags1(B);
 }
 
-:ANDD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0110) ... & operandsMemWord6
+:ANDD memWord5	is (op7_7 = 0b1 & op3_0=0b0110 & (prefix=0 | prefix=2 | prefix=3)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	D = D & op1;
 	processFlags1(D);
 }
 
-:ANDE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0110) ... & operandsMemWord2
+:ANDE memWord2	is (op7_7 = 0b0 & op3_0=0b0110 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	E = E & op1;
 	processFlags1(E);
@@ -993,13 +975,13 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	SM = SM && op1[4,1];
 }
 
-:ASL operandsMemByte1	is (op7_6=0b00 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10 | (prefix=1 & op5_4=0b11)) & op3_0=0b0100) ... & operandsMemByte1 
+:ASL memByte1	is (op7_6=0b00 & op3_0=0b0100 & (prefix=1 | $(NotPrefix0AndOp54))) ... & memByte1 
 {
 	
-	tmp:1 = operandsMemByte1;
+	tmp:1 = memByte1;
 	C = (tmp s< 0);
 	tmp = tmp << 1;
-	operandsMemByte1 = tmp;
+	memByte1 = tmp;
 	shiftFlags(tmp);	
 }
 
@@ -1041,22 +1023,22 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	computeEV();
 }	
 
-:ASLW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0100) ... & operandsMemWord1
+:ASLW memWord1	is (op7_6=0b00 & op3_0=0b0100 & prefix=2) ... & memWord1
 {
-	local tmp:2 = operandsMemWord1;
+	local tmp:2 = memWord1;
 
 	C = (tmp s< 0);
 	tmp = tmp << 1;
-	operandsMemWord1 = tmp;
+	memWord1 = tmp;
 	shiftFlags(tmp);	
 }
 
-:ASR operandsMemByte1	is (op3_0=0b1101 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:ASR memByte1	is (op3_0=0b1101 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	tmp:1 = operandsMemByte1;
+	tmp:1 = memByte1;
 	C = tmp[0,1];
 	tmp = tmp s>> 1;
-	operandsMemByte1 = tmp;
+	memByte1 = tmp;
 	shiftFlags(tmp);	
 }
 
@@ -1097,13 +1079,13 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	computeEV();
 }
 
-:ASRW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1101) ... & operandsMemWord1 
+:ASRW memWord1	is (op7_6=0b00 & op3_0=0b1101 & prefix=2) ... & memWord1 
 {
-	local tmp:2 = operandsMemWord1;
+	local tmp:2 = memWord1;
 
 	C = tmp[0,1];
 	tmp = tmp >> 1;
-	operandsMemWord1 = tmp;
+	memWord1 = tmp;
 	shiftFlags(tmp);	
 }
 
@@ -1113,24 +1095,23 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	if (C == 0) goto dest_rel8;
 }
 
-# BCLR #############################################
 
-:BCLR operandsMemByte3,iopr8	is ((op7_6=0b00 & op3_0=0b1000) ; iopr8) ...& operandsMemByte3
+:BCLR memByte3,iopr8	is ((op7_6=0b00 & op3_0=0b1000 & (prefix=0 | prefix=1)) ; iopr8) ... & memByte3
 {
 	local msk8:1 = iopr8;
-	local op1:1 = operandsMemByte3;
+	local op1:1 = memByte3;
 	op1 = op1 & ~msk8;
-	operandsMemByte3 = op1;
+	memByte3 = op1;
 	processFlags1(op1); 
 }
 
-:BCLRW operandsMemWord1, iopr16	is ((prefix=2 & op7_6=0b00 & op3_0=0b1000) ... & operandsMemWord1); iopr16
+:BCLRW memWord1, iopr16	is ((op7_6=0b00 & op3_0=0b1000 & prefix=2) ... & memWord1); iopr16
 {
 	local msk16:2 = iopr16;
-	local op1:2 = operandsMemWord1;
+	local op1:2 = memWord1;
 
 	op1 = op1 & ~msk16;
-	operandsMemWord1 = op1;
+	memWord1 = op1;
 	processFlags1(op1); 
 }
 
@@ -1164,16 +1145,16 @@ dest_rel16: reloc is	simm16	[reloc = inst_start + 6 + simm16;]
 	if ((C || Z) == 0) goto dest_rel8;
 }
 
-:BITA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b1001) ... & operandsMemByte2
+:BITA memByte2	is (op7_6=0b01 & op3_0=0b1001 & $(NotPrefix3)) ... & memByte2
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 	local result:1 = A & op1;
 	processFlags1(result); 
 }
 
-:BITB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b1001) ... & operandsMemByte2 
+:BITB memByte2	is (op7_6=0b11 & op3_0=0b1001 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 	local result:1 = B & op1;
 	processFlags1(result); 
 }
@@ -1262,24 +1243,22 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 }
 
 
-# BSET #############################################
-
-:BSET operandsMemByte3,iopr8	is ((op7_6=0b00 & op3_0=0b1001) ; iopr8) ...& operandsMemByte3
+:BSET memByte3,iopr8	is ((op7_6=0b00 & op3_0=0b1001 & (prefix=0 | prefix=1)) ; iopr8) ...& memByte3
 {
 	local msk8:1 = iopr8;
-	local op1:1 = operandsMemByte3;
+	local op1:1 = memByte3;
 	op1 = op1 | msk8;
-	operandsMemByte3 = op1;
+	memByte3 = op1;
 	processFlags1(op1); 
 }
 
-:BSETW operandsMemWord1, iopr16	is ((prefix=2 & op7_6=0b00 & op3_0=0b1001) ... & operandsMemWord1); iopr16
+:BSETW memWord1, iopr16	is ((op7_6=0b00 & op3_0=0b1001 & prefix=2) ... & memWord1); iopr16
 {
 	local msk16:2 = iopr16;
-	local op1:2 = operandsMemWord1;
+	local op1:2 = memWord1;
 
 	op1 = op1 | msk16;
-	operandsMemWord1 = op1;
+	memWord1 = op1;
 	processFlags1(op1); 
 }
 
@@ -1311,9 +1290,9 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	subtraction_flags8(A, B, tmp);
 }
 
-:CLR operandsMemByte1	is (op3_0=0b0101 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:CLR memByte1	is (op3_0=0b0101 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	operandsMemByte1 = 0;
+	memByte1 = 0;
 	clearFlags();
 }
 
@@ -1348,32 +1327,32 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	EV = 0;
 }
 
-:CLRW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0101) ... & operandsMemWord1 
+:CLRW memWord1	is (op7_6=0b00 & op3_0=0b0101 & prefix=2) ... & memWord1 
 {
-	operandsMemWord1 = 0;
+	memWord1 = 0;
 	clearFlags();
 }
 
-:CMPA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b1000) ... & operandsMemByte2 
+:CMPA memByte2	is (op7_6=0b01 & op3_0=0b1000 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	local tmp:1 = A - op1;
 	subtraction_flags8(A, op1, tmp);
 }
 
-:CMPB operandsMemByte2 is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b1000) ... & operandsMemByte2 
+:CMPB memByte2 is (op7_6=0b11 & op3_0=0b1000 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	local tmp:1 = B - op1;
 	subtraction_flags8(B, op1, tmp);
 }
 
-:COM operandsMemByte1	is (op3_0=0b0000 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:COM memByte1	is (op3_0=0b0000 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	local tmp:1 = ~(operandsMemByte1);
-	operandsMemByte1 = tmp;
+	local tmp:1 = ~(memByte1);
+	memByte1 = tmp;
 	C = 1;
 	processFlags1(tmp);
 }
@@ -1407,57 +1386,57 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	processFlags1(E);
 }
 
-:COMW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0000) ... & operandsMemWord1 
+:COMW memWord1	is (op7_6=0b00 & op3_0=0b0000 & prefix=2) ... & memWord1 
 {
-	local tmp:2 = ~(operandsMemWord1);
-	operandsMemWord1 = tmp;
+	local tmp:2 = ~(memWord1);
+	memWord1 = tmp;
 	C = 1;
 	processFlags1(tmp);
 }
 
-:CPD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b1000)  ... & operandsMemWord6
+:CPD memWord5	is (op7_7 = 0b1 & op3_0=0b1000 & (prefix=0 | prefix=2 | prefix=3))  ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	local tmp:2 = D - op1;
 	subtraction_flags16(D, op1, tmp);
 }
 
-:CPE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b1000) ... & operandsMemWord2
+:CPE memWord2	is (op7_7 = 0b0 & op3_0=0b1000 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	local tmp:2 = E - op1;
 	subtraction_flags16(E, op1, tmp);
 }
 
-:CPS operandsMemWord5	is (op7_6=0b01 & op3_0=0b1111) ... & operandsMemWord5
+:CPS memWord4	is (op7_6=0b01 & op3_0=0b1111 & (prefix=0 | prefix=1 | prefix=3)) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	local tmp:2 = SP - op1;
 	subtraction_flags16(SP, op1, tmp);
 }
 
-:CPX operandsMemWord5	is (op7_6=0b01 &  op3_0=0b1100) ... & operandsMemWord5
+:CPX memWord4	is (op7_6=0b01 &  op3_0=0b1100 & (prefix=0 | prefix=1 | prefix=3)) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	local tmp:2 = IX - op1;
 	subtraction_flags16(IX, op1, tmp);
 }
 
-:CPY operandsMemWord5	is (op7_6=0b01 & op3_0=0b1101) ... & operandsMemWord5
+:CPY memWord4	is (op7_6=0b01 & op3_0=0b1101 & (prefix=0 | prefix=1 | prefix=3)) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	local tmp:2 = IY - op1;
 	subtraction_flags16(IY, op1, tmp);
 }
  
-:CPZ operandsMemWord5	is (op7_6=0b01 & op3_0=0b1110) ... & operandsMemWord5
+:CPZ memWord4	is (op7_6=0b01 & op3_0=0b1110 & (prefix=0 | prefix=1 | prefix=3)) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	local tmp:2 = IZ - op1;
 	subtraction_flags16(IZ, op1, tmp);
@@ -1481,11 +1460,11 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	#V is undefined
 }
 
-:DEC operandsMemByte1	is (op3_0=0b0001 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:DEC memByte1	is (op3_0=0b0001 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	tmp:1 = operandsMemByte1;
+	tmp:1 = memByte1;
 	result:1 = tmp - 1;
-	operandsMemByte1 = result;
+	memByte1 = result;
 	decFlags(tmp, result);
 }
 
@@ -1503,11 +1482,11 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	decFlags(tmp, B);
 }
 
-:DECW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0001) ... & operandsMemWord1 
+:DECW memWord1	is (op7_6=0b00 & op3_0=0b0001 & prefix=2) ... & memWord1 
 {
-	tmp:2 = operandsMemWord1;
+	tmp:2 = memWord1;
 	result:2 = tmp - 1;
-	operandsMemWord1 = result;
+	memWord1 = result;
 	decFlags(tmp, result);
 }
 
@@ -1568,33 +1547,33 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	C = result[15,1];
 }
 
-:EORA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0100) ... & operandsMemByte2 
+:EORA memByte2	is (op7_6=0b01 & op3_0=0b0100 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	A = A ^ op1;
 	processFlags1(A);
 }
 
-:EORB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0100) ... & operandsMemByte2 
+:EORB memByte2	is (op7_6=0b11 & op3_0=0b0100 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	B = B ^ op1;
 	processFlags1(B);
 }
 
-:EORD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0100) ... & operandsMemWord6
+:EORD memWord5	is (op7_7 = 0b1 & op3_0=0b0100 & (prefix=0 | prefix=2 | prefix=3)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	D = D ^ op1;
 	processFlags1(D);
 }
 
-:EORE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0100) ... & operandsMemWord2
+:EORE memWord2	is (op7_7 = 0b0 & op3_0=0b0100 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	E = E ^ op1;
 	processFlags1(E);
@@ -1635,12 +1614,12 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	V = 0;
 }
 
-:INC operandsMemByte1	is (op3_0=0b0011 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:INC memByte1	is (op3_0=0b0011 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	local tmp:1 = operandsMemByte1;
+	local tmp:1 = memByte1;
 
 	local result:1 = tmp + 1;
-	operandsMemByte1 = result;
+	memByte1 = result;
 	incFlags(result);
 }
 
@@ -1658,12 +1637,12 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	incFlags(B);
 }
 
-:INCW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0011) ... & operandsMemWord1 
+:INCW memWord1	is (op7_6=0b00 & op3_0=0b0011 & prefix=2) ... & memWord1 
 {
-	local tmp:2 = operandsMemWord1;
+	local tmp:2 = memWord1;
 
 	local result:2 = tmp + 1;
-	operandsMemWord1 = result;
+	memWord1 = result;
 	incFlags(result);
 }
 
@@ -1785,34 +1764,34 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	if (V == 1) goto dest_rel16;
 }
 
-:LDAA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0101) ... & operandsMemByte2 
+:LDAA memByte2	is (op7_6=0b01 & op3_0=0b0101 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	A = op1;
 	processFlags1(A);
 }
 
-:LDAB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0101) ... & operandsMemByte2 
+:LDAB memByte2	is (op7_6=0b11 & op3_0=0b0101 & $(NotPrefix3)) ... & memByte2 
 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	B = op1;
 	processFlags1(B);
 }
 
-:LDD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0101) ... & operandsMemWord6
+:LDD memWord5	is (op7_7 = 0b1 & op3_0=0b0101 & (prefix=0 | prefix=2 | prefix=3)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	D = op1;
 	processFlags1(D);
 }
 
-:LDE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0101) ... & operandsMemWord2
+:LDE memWord2	is (op7_7 = 0b0 & op3_0=0b0101 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	E = op1;
 	processFlags1(E);
@@ -1838,34 +1817,34 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	IR = op1;
 }
 
-:LDS operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1111) ... & operandsMemWord5
+:LDS memWord4	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1111) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	SP = op1;
 	processFlags1(SP);
 }
 
-:LDX operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1100) ... & operandsMemWord5
+:LDX memWord4	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1100) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	IX = op1;
 	processFlags1(IX);
 }
  
-:LDY operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1101) ... & operandsMemWord5
+:LDY memWord4	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1101) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	IY = op1;
 	processFlags1(IY);
 }
 
  
-:LDZ operandsMemWord5	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1110) ... & operandsMemWord5
+:LDZ memWord4	is ((((prefix=0 | prefix=1) & op7_6=0b11) | (prefix=3 & op7_6=0b10)) & op3_0=0b1110) ... & memWord4
 {
-	local op1:2 = operandsMemWord5;
+	local op1:2 = memWord4;
 
 	IZ = op1;
 	processFlags1(IZ);
@@ -1878,11 +1857,11 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	<skippedNext>
 }
 
-:LSR operandsMemByte1	is (op3_0=0b1111 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:LSR memByte1	is (op3_0=0b1111 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	local tmp:1 = operandsMemByte1;
+	local tmp:1 = memByte1;
 	local op1:1 = tmp >> 1;
-	operandsMemByte1 = op1;
+	memByte1 = op1;
 	rightShiftFlags(tmp, op1);
 }
 
@@ -1914,11 +1893,11 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	rightShiftFlags(tmp, E);
 }
 
-:LSRW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1111) ... & operandsMemWord1 
+:LSRW memWord1	is (op7_6=0b00 & op3_0=0b1111 & prefix=2) ... & memWord1 
 {
-	local tmp:2 = operandsMemWord1;
+	local tmp:2 = memWord1;
 	local op1:2 = tmp >> 1;
-	operandsMemWord1 = op1;
+	memWord1 = op1;
 	rightShiftFlags(tmp, op1);
 }
 
@@ -1988,11 +1967,11 @@ yo: simm8 is simm8
 	C = (D[7,1] == 1);
 }
 
-:NEG operandsMemByte1	is (op3_0=0b0010 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:NEG memByte1	is (op3_0=0b0010 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	local op1:1 = operandsMemByte1;
+	local op1:1 = memByte1;
 	local op2:1 = 0-op1;
-	operandsMemByte1 = op2;
+	memByte1 = op2;
 	negFlags(op1, op2);
 }
 
@@ -2028,11 +2007,11 @@ yo: simm8 is simm8
 	negFlags(op1, op2);
 }
 
-:NEGW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0010) ... & operandsMemWord1
+:NEGW memWord1	is (op7_6=0b00 & op3_0=0b0010 & prefix=2) ... & memWord1
 {
-	local op1:2 = operandsMemWord1;
+	local op1:2 = memWord1;
 	local op2:2 = 0-op1;
-	operandsMemWord1 = op2;
+	memWord1 = op2;
 	negFlags(op1, op2);
 }
 
@@ -2040,33 +2019,33 @@ yo: simm8 is simm8
 {
 }
 
-:ORAA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0111) ... & operandsMemByte2 
+:ORAA memByte2	is (op7_6=0b01 & op3_0=0b0111 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	A = A | op1;
 	processFlags1(A);
 }
 
-:ORAB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0111) ... & operandsMemByte2 
+:ORAB memByte2	is (op7_6=0b11 & op3_0=0b0111 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1:1 = operandsMemByte2;
+	local op1:1 = memByte2;
 
 	B = B | op1;
 	processFlags1(B);
 }
 
-:ORD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0111) ... & operandsMemWord6
+:ORD memWord5	is (op7_7 = 0b1 & op3_0=0b0111 & (prefix=0 | prefix=2 | prefix=3)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	D = D | op1;
 	processFlags1(D);
 }
 
-:ORE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0111) ... & operandsMemWord2
+:ORE memWord2	is (op7_7 = 0b0 & op3_0=0b0111 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	E = E | op1;
 	processFlags1(E);
@@ -2270,14 +2249,14 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	if (E s>= 0) goto <rmacLoop>;
 }
 
-:ROL operandsMemByte1	is (op3_0=0b1100 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:ROL memByte1	is (op3_0=0b1100 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
 	tmpC:1 = C;
-	local op1:1 = operandsMemByte1;
+	local op1:1 = memByte1;
 	C = op1[7,1];
 	local result:1 = op1 << 1;
 	result = result | tmpC;
-	operandsMemByte1 = result;
+	memByte1 = result;
 	shiftFlags(result);
 }
 
@@ -2317,25 +2296,25 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	shiftFlags(E);
 }
 
-:ROLW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1100) ... & operandsMemWord1
+:ROLW memWord1	is (op7_6=0b00 & op3_0=0b1100 & prefix=2) ... & memWord1
 {
 	tmpC:2 = zext(C);
-	local op1:2 = operandsMemWord1;
+	local op1:2 = memWord1;
 	C = op1[15,1];
 	local result:2 = op1 << 1;
 	result = result | tmpC;
-	operandsMemWord1 = result;
+	memWord1 = result;
 	shiftFlags(result);
 }
 
-:ROR operandsMemByte1	is (op3_0=0b1110 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:ROR memByte1	is (op3_0=0b1110 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
 	tmpC:1 = C << 7;
-	local op1:1 = operandsMemByte1;
+	local op1:1 = memByte1;
 	C = op1[0,1];
 	local result = op1 >> 1;
 	result = result | tmpC;
-	operandsMemByte1 = result;
+	memByte1 = result;
 	shiftFlags(result);
 }
 
@@ -2375,14 +2354,14 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	shiftFlags(E);
 }
 
-:RORW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b1110) ... & operandsMemWord1 
+:RORW memWord1	is (op7_6=0b00 & op3_0=0b1110 & prefix=2) ... & memWord1 
 {
 	tmpC:2 = zext(C) << 15;
-	local op1:2 = operandsMemWord1;
+	local op1:2 = memWord1;
 	C = op1[0,1];
 	local result:2 = op1 >> 1;
 	result = result | tmpC;
-	operandsMemWord1 = result;
+	memWord1 = result;
 	shiftFlags(result);
 }
 
@@ -2419,36 +2398,36 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	A = result;
 }
 
-:SBCA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0010) ... & operandsMemByte2 
+:SBCA memByte2	is (op7_6=0b01 & op3_0=0b0010 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1 = operandsMemByte2;
+	local op1 = memByte2;
 
 	local result:1;
 	subtractionWithCarry8(A, op1, result);
 	A = result;
 }
 
-:SBCB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0010) ... & operandsMemByte2 
+:SBCB memByte2	is (op7_6=0b11 & op3_0=0b0010 & $(NotPrefix3)) ... & memByte2 
 {
-	local op1 = operandsMemByte2;
+	local op1 = memByte2;
 
 	local result:1;
 	subtractionWithCarry8(B, op1, result);
 	B = result;
 }
 
-:SBCD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0010) ... & operandsMemWord6
+:SBCD memWord5	is (op7_7 = 0b1 & op3_0=0b0010 & (prefix=0 | prefix=2 | prefix=3)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	local result:2;
 	subtractionWithCarry16(D, op1, result);
 	D = result;
 }
 
-:SBCE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0010) ... & operandsMemWord2
+:SBCE memWord2	is (op7_7 = 0b0 & op3_0=0b0010 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	local result:2;
 	subtractionWithCarry16(E, op1, result);
@@ -2462,31 +2441,31 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	E = result;
 }
 
-:STAA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b1010) ... & operandsMemByte2 
+:STAA memByte2	is (op7_6=0b01 & op3_0=0b1010 & $(NotPrefix3)) ... & memByte2 
 {
-	operandsMemByte2 = A;
+	memByte2 = A;
 
 	processFlags1(A);
 }
 
-:STAB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b1010) ... & operandsMemByte2 
+:STAB memByte2	is (op7_6=0b11 & op3_0=0b1010 & $(NotPrefix3)) ... & memByte2 
 {
-	operandsMemByte2 = B;
+	memByte2 = B;
 
 	processFlags1(B);
 }
 
 
-:STD operandsMemWord6	is ((((prefix=0 | prefix=2) & op7_6=0b10) | (prefix=3 & op7_7=0b1)) & op3_0=0b1010) ... & operandsMemWord6  # no imm16
+:STD memWord5	is ((((prefix=0 | prefix=2) & op7_6=0b10) | (prefix=3 & op7_7=0b1)) & op3_0=0b1010) ... & memWord5  # no imm16
 {
-	operandsMemWord6 = D;
+	memWord5 = D;
 
 	processFlags1(D);
 }
 
-:STE operandsMemWord2	is (prefix=3 & op3_0=0b1010  & op7_6 = 0b01) ... & operandsMemWord2 # no imm16, explicit prefix=3 to avoid conflict with STAA
+:STE memWord2	is (prefix=3 & op3_0=0b1010  & op7_6 = 0b01) ... & memWord2 # no imm16 by specifying op6 = 1, avoid conflict with STAA
 {
-	operandsMemWord2 = E;
+	memWord2 = E;
 
 	processFlags1(E);
 }
@@ -2499,64 +2478,64 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	*:4 addr = op1;
 }
  
-:STS operandsMemWord4	is (op3_0=0b1111 & op7_6=0b10) ... & operandsMemWord4
+:STS memWord3	is (op3_0=0b1111 & op7_6=0b10 & (prefix=0 | prefix=1)) ... & memWord3
 {
-	operandsMemWord4 = SP;
+	memWord3 = SP;
 
 	processFlags1(SP);
 }
  
-:STX operandsMemWord4	is (op3_0=0b1100 & op7_6=0b10) ... & operandsMemWord4
+:STX memWord3	is (op3_0=0b1100 & op7_6=0b10 & (prefix=0 | prefix=1)) ... & memWord3
 {
-	operandsMemWord4 = IX;
+	memWord3 = IX;
 
 	processFlags1(IX);
 }
  
-:STY operandsMemWord4	is (op3_0=0b1101 & op7_6=0b10) ... & operandsMemWord4
+:STY memWord3	is (op3_0=0b1101 & op7_6=0b10 & (prefix=0 | prefix=1)) ... & memWord3
 {
-	operandsMemWord4 = IY;
+	memWord3 = IY;
 
 	processFlags1(IY);
 }
  
-:STZ operandsMemWord4	is (op3_0=0b1110 & op7_6=0b10) ... & operandsMemWord4
+:STZ memWord3	is (op3_0=0b1110 & op7_6=0b10 & (prefix=0 | prefix=1)) ... & memWord3
 {
-	operandsMemWord4 = IZ;
+	memWord3 = IZ;
 
 	processFlags1(IZ);
 }
 
-:SUBA operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b01 & op3_0=0b0000) ... & operandsMemByte2  
+:SUBA memByte2	is (op7_6=0b01 & op3_0=0b0000 & $(NotPrefix3)) ... & memByte2  
 {
-	local op1 = operandsMemByte2;
+	local op1 = memByte2;
 
 	local result:1 = A - op1;
 	subtraction_flags8(A, op1, result);
 	A = result;
 }
 
-:SUBB operandsMemByte2	is ((prefix=0 | prefix=1 | prefix=2) & op7_6=0b11 & op3_0=0b0000) ... & operandsMemByte2  
+:SUBB memByte2	is (op7_6=0b11 & op3_0=0b0000 & $(NotPrefix3)) ... & memByte2  
 {
-	local op1 = operandsMemByte2;
+	local op1 = memByte2;
 
 	local result:1 = B - op1;
 	subtraction_flags8(B, op1, result);
 	B = result;
 }
 
-:SUBD operandsMemWord6	is (op7_7 = 0b1 & op3_0=0b0000) ... & operandsMemWord6
+:SUBD memWord5	is (op7_7 = 0b1 & op3_0=0b0000 & (prefix=0 | prefix=2 | prefix=3)) ... & memWord5
 {
-	local op1:2 = operandsMemWord6;
+	local op1:2 = memWord5;
 
 	result:2 = D - op1;
 	subtraction_flags16(D, op1, result);
 	D = result;
 }
 
-:SUBE operandsMemWord2	is (prefix=3 & op7_7 = 0b0 & op3_0=0b0000) ... & operandsMemWord2
+:SUBE memWord2	is (op7_7 = 0b0 & op3_0=0b0000 & prefix=3) ... & memWord2
 {
-	local op1:2 = operandsMemWord2;
+	local op1:2 = memWord2;
 
 	result:2 = E - op1;
 	subtraction_flags16(E, op1, result);
@@ -2763,9 +2742,9 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	B[0,4] = SP_EXT[0,4];
 }
 
-:TST operandsMemByte1	is (op3_0=0b0110 & (prefix=1 | (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10))) & op7_6=0b00)  ... & operandsMemByte1 
+:TST memByte1	is (op3_0=0b0110 & op7_6=0b00 & (prefix=1 | $(NotPrefix0AndOp54)))  ... & memByte1 
 {
-	local op1:1 = operandsMemByte1;
+	local op1:1 = memByte1;
 
 	testFlags(op1);
 }
@@ -2791,9 +2770,9 @@ imm6L: imm6c is imm6c & imm6c=0 {}
 	testFlags(E);
 }
 
-:TSTW operandsMemWord1	is (prefix=2 & op7_6=0b00 & op3_0=0b0110) ... & operandsMemWord1 
+:TSTW memWord1	is (op7_6=0b00 & op3_0=0b0110 & prefix=2) ... & memWord1 
 {
-	local op1:2 = operandsMemWord1;
+	local op1:2 = memWord1;
 
 	testFlags(op1);
 }
