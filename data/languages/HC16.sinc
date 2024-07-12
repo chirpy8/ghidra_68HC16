@@ -360,7 +360,7 @@ macro buildK()
 macro syncToK()
 {
 	EK = zext(K[12,4]) << 16;
-	XKE = zext(K[12,4]);
+	XKE = zext(K[8,4]);
 	YKE = zext(K[4,4]);
 	ZKE = zext(K[0,4]);
 }
