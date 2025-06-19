@@ -51,6 +51,7 @@ define register offset=0xC0 size=4 contextreg;
 define context contextreg # used to decode code pages, via :^instruction tables
   phase=(0,0)    # 0:initial, 1:instruction-parse
   prefix=(1,2)   # 0:none, 1: 0x17, 2:0x27, 3:0x37)
+  jumpTarget=(8,31)	# for computing branch addresses
 ;
 
 
@@ -108,6 +109,10 @@ define token data16 (16)
 	imm16a = (0,15)
 	simm16 = (0,15) signed
 ;
+
+define token data24 (24)
+	imm24 = (0,23)
+	;
 
 #attach variables [op5_4] [IX IY IZ _ ]; # used to select register for indexed addressing
 attach variables [op5_4a] [IXE IYE IZE _ ]; # used to select extended register for indexed addressing
@@ -655,11 +660,25 @@ operandsMemByteAddr9: imm16 is prefix=3 & op8 ; imm16a ; imm16
 #	export *:1 addr;
 #}
 
-operand20: addr,op5_4b is (prefix=0 & (op5_4=0b00 | op5_4=0b01 | op5_4=0b10) & op5_4a & op5_4b); imm8; simm16
-[addr = (((imm8 & 0x0f) << 16) + (simm16 & 0xffff) + op5_4a) & 0x0fffff;]
+operand20: addr,op5_4b is (prefix=0 & (op5_4=0b00) & op5_4b); imm8; simm16
+[addr = (((imm8 & 0x0f) << 16) + (simm16 & 0xffff) + IX) & 0x0fffff;]
 {
 	export *:1 addr;
 }
+
+operand20: addr,op5_4b is (prefix=0 & (op5_4=0b01) & op5_4b); imm8; simm16
+[addr = (((imm8 & 0x0f) << 16) + (simm16 & 0xffff) + IY) & 0x0fffff;]
+{
+	export *:1 addr;
+}
+
+
+operand20: addr,op5_4b is (prefix=0 & (op5_4=0b10) & op5_4b); imm8; simm16
+[addr = (((imm8 & 0x0f) << 16) + (simm16 & 0xffff) + IZ) & 0x0fffff;]
+{
+	export *:1 addr;
+}
+
 
 # code location from 20 bit address
 operand20: addrTarget is (prefix=0 & op5_4=0b11) ; imm8; imm16
@@ -1662,6 +1681,7 @@ branchTarget4: dest_rel16 is op7_7=0b0 ; mask8 ; imm16 ; dest_rel16 { export des
 	
 	call operand20;	
 }
+
 
 :LBCC dest_rel16 is prefix=3 & op8=0x84; dest_rel16
 {
